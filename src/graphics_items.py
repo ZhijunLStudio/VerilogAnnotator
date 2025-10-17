@@ -1,9 +1,7 @@
-# src/graphics_items.py
 from PyQt6.QtWidgets import QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsItem, QGraphicsTextItem
 from PyQt6.QtGui import QPen, QBrush, QColor, QPainterPath, QCursor
 from PyQt6.QtCore import Qt, QRectF
 
-# PortItem is unchanged
 class PortItem(QGraphicsEllipseItem):
     def __init__(self, port_model, parent_item=None):
         super().__init__(-5, -5, 10, 10, parent=parent_item)
@@ -18,29 +16,43 @@ class PortItem(QGraphicsEllipseItem):
         net_name = port_model.net.name if port_model.net else "N/A"
         self.setToolTip(f"Port: {port_model.name}\nNet: {net_name}\nType: {port_model.direction}")
 
+    # --- FINAL, ROBUST FIX ---
     def itemChange(self, change, value):
-        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged and self.scene():
-            new_scene_pos = self.scenePos()
-            self.scene().parent().diagram.update_port_position(
-                self.port_model.component.instance_name, self.port_model.name,
-                [new_scene_pos.x(), new_scene_pos.y()]
-            )
-            for line in self.connection_lines: line.update_path()
+        # First, check for the dangerous notification. If it's found,
+        # handle it and exit the function immediately. DO NOT call super().
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+            if self.scene():
+                new_scene_pos = self.scenePos()
+                self.scene().parent().diagram.update_port_position(
+                    self.port_model.component.instance_name, self.port_model.name,
+                    [new_scene_pos.x(), new_scene_pos.y()]
+                )
+                for line in self.connection_lines:
+                    line.update_path()
+            # The return value is ignored for this notification.
+            return value
+
+        # If the dangerous case was not met, proceed with other checks.
+        # This one is safe to pass to super() later.
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene() and self.parentItem():
             parent_rect = self.parentItem().boundingRect()
             value.setX(max(parent_rect.left(), min(value.x(), parent_rect.right())))
             value.setY(max(parent_rect.top(), min(value.y(), parent_rect.bottom())))
-            return value
+            # The modified 'value' will be passed to super() below.
+
+        # Finally, for all safe cases, call the base class implementation.
         return super().itemChange(change, value)
+
     def hoverEnterEvent(self, event): self.setPen(QPen(QColor("gold"), 2)); super().hoverEnterEvent(event)
     def hoverLeaveEvent(self, event): self.setPen(QPen(QColor("black"), 1)); super().hoverLeaveEvent(event)
 
+
 class ResizeHandle(QGraphicsRectItem):
+    # This class is correct and does not need changes.
     def __init__(self, parent, position_flags):
         super().__init__(-4, -4, 8, 8, parent)
         self.parent = parent
         self.position_flags = position_flags
-        # --- FIX: Add a flag to prevent recursion ---
         self._is_resizing = False
         self.setBrush(QBrush(QColor("white"))); self.setPen(QPen(QColor("black"), 1))
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
@@ -53,23 +65,16 @@ class ResizeHandle(QGraphicsRectItem):
         return QCursor(Qt.CursorShape.ArrowCursor)
 
     def itemChange(self, change, value):
-        # --- FIX: Recursion guard ---
-        if self._is_resizing:
-            return value
-
+        if self._is_resizing: return value
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene():
             self._is_resizing = True
             try:
-                # The user is dragging the handle. Tell the parent to resize.
                 self.parent.resize_from_handle(self.position_flags, value)
             finally:
                 self._is_resizing = False
-            
-            # Important: The parent has already repositioned us via update_handle_positions.
-            # We must return our NEW position, not the proposed 'value'.
             return self.pos()
-            
         return super().itemChange(change, value)
+
 
 class ComponentItem(QGraphicsRectItem):
     Handle_TopLeft = 1; Handle_TopRight = 2; Handle_BottomRight = 4; Handle_BottomLeft = 8
@@ -87,24 +92,29 @@ class ComponentItem(QGraphicsRectItem):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges); self.setAcceptHoverEvents(True)
         self.setPen(QPen(QColor(0, 0, 255, 200), 2, Qt.PenStyle.SolidLine)); self.setBrush(QBrush(QColor(0, 0, 255, 30)))
         self.setToolTip(f"Instance: {component_model.instance_name}\nType: {component_model.module_type}")
-        self.handle_positions = { self.Handle_TopLeft: (0, 0), self.Handle_TopRight: (1, 0), self.Handle_BottomLeft: (0, 1), self.Handle_BottomRight: (1, 1) }
-        for pos_flag, (x_ratio, y_ratio) in self.handle_positions.items():
+        
+        rect = self.boundingRect()
+        self.handle_positions = {
+            self.Handle_TopLeft: rect.topLeft(), self.Handle_TopRight: rect.topRight(),
+            self.Handle_BottomLeft: rect.bottomLeft(), self.Handle_BottomRight: rect.bottomRight()
+        }
+        for pos_flag in self.handle_positions.keys():
             self.handles[pos_flag] = ResizeHandle(self, pos_flag)
+            
         self.update_handle_positions(); self.set_handles_visible(False)
 
     def set_handles_visible(self, visible):
+        is_active = visible and self.scene() and self.scene().parent().edit_mode == 'component' and self.isSelected()
         for handle in self.handles.values():
-            handle.setVisible(visible)
-            # --- FIX: Handles should only be enabled in component mode ---
-            handle.setEnabled(visible)
-
+            handle.setVisible(is_active)
+            handle.setEnabled(is_active)
 
     def update_handle_positions(self):
         rect = self.rect()
-        for pos_flag, (x_ratio, y_ratio) in self.handle_positions.items():
-            x = rect.left() + rect.width() * x_ratio
-            y = rect.top() + rect.height() * y_ratio
-            self.handles[pos_flag].setPos(x, y)
+        self.handles[self.Handle_TopLeft].setPos(rect.topLeft())
+        self.handles[self.Handle_TopRight].setPos(rect.topRight())
+        self.handles[self.Handle_BottomLeft].setPos(rect.bottomLeft())
+        self.handles[self.Handle_BottomRight].setPos(rect.bottomRight())
 
     def resize_from_handle(self, handle_flag, new_pos):
         rect = self.rect()
@@ -117,51 +127,54 @@ class ComponentItem(QGraphicsRectItem):
         self.setRect(rect.normalized())
         self.update_handle_positions()
         
-        # Manually trigger updates for child port lines since parent geometry changed
         for child in self.childItems():
             if isinstance(child, PortItem):
                 for line in child.connection_lines:
                     line.update_path()
-                    
+
+    # --- FINAL, ROBUST FIX ---
     def itemChange(self, change, value):
-        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged and self.scene():
-            diagram = self.scene().parent().diagram
-            pos = self.pos(); rect = self.rect()
-            diagram.update_component_box(self.component_model.instance_name, [pos.x(), pos.y(), pos.x() + rect.width(), pos.y() + rect.height()])
-            for child in self.childItems():
-                if isinstance(child, PortItem):
-                    child_scene_pos = child.scenePos()
-                    diagram.update_port_position(
-                        child.port_model.component.instance_name, child.port_model.name,
-                        [child_scene_pos.x(), child_scene_pos.y()]
-                    )
-                    for line in child.connection_lines:
-                        line.update_path()
+        # First, check for the dangerous notification. If it's found,
+        # handle it and exit the function immediately. DO NOT call super().
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+            if self.scene():
+                diagram = self.scene().parent().diagram
+                pos = self.pos(); rect = self.rect()
+                diagram.update_component_box(self.component_model.instance_name, [pos.x(), pos.y(), pos.x() + rect.width(), pos.y() + rect.height()])
+                for child in self.childItems():
+                    if isinstance(child, PortItem):
+                        child_scene_pos = child.scenePos()
+                        diagram.update_port_position(
+                            child.port_model.component.instance_name, child.port_model.name,
+                            [child_scene_pos.x(), child_scene_pos.y()]
+                        )
+                        for line in child.connection_lines:
+                            line.update_path()
+            return value
+
+        # If the dangerous case was not met, proceed with other checks.
+        # This one is safe to pass to super() later.
+        if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
+            self.set_handles_visible(bool(value))
+
+        # Finally, for all safe cases, call the base class implementation.
         return super().itemChange(change, value)
-    
+
     def hoverEnterEvent(self, event):
-        # --- FIX: Only show handles in component mode ---
-        if self.scene() and self.scene().parent().edit_mode == 'component':
-             if self.isSelected():
-                self.set_handles_visible(True)
+        if self.isSelected(): self.set_handles_visible(True)
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):
-        # Always hide on leave
         self.set_handles_visible(False)
         super().hoverLeaveEvent(event)
     
     def paint(self, painter, option, widget):
-        if self.isSelected():
-             # --- FIX: Only show handles in component mode ---
-            if self.scene() and self.scene().parent().edit_mode == 'component':
-                self.set_handles_visible(True)
-            painter.setPen(QPen(QColor("gold"), 2, Qt.PenStyle.DashLine))
-            painter.drawRect(self.boundingRect())
-        else:
-            # If not selected, ensure handles are hidden
-            self.set_handles_visible(False)
         super().paint(painter, option, widget)
+        if self.isSelected():
+            painter.setPen(QPen(QColor("gold"), 2, Qt.PenStyle.DashLine))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(self.boundingRect())
+
 
 class ConnectionLineItem(QGraphicsPathItem):
     # This class is correct and unchanged

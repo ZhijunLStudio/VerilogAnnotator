@@ -334,10 +334,15 @@ class MainWindow(QMainWindow):
         direction = 'input' if self.view.drawing_mode == 'add_input' else 'output'
         comp_item_under = next((item for item in self.view.items(self.view.mapFromScene(scene_pos)) if isinstance(item, ComponentItem)), None)
         instance_name = comp_item_under.component_model.instance_name if comp_item_under else None
-        if self.diagram.add_port(instance_name, direction, [scene_pos.x(), scene_pos.y()]):
+        
+        new_port = self.diagram.add_port(instance_name, direction, [scene_pos.x(), scene_pos.y()])
+        if new_port:
+            # FIX: 在成功添加端口后，必须刷新场景以显示新端口
+            self.refresh_scene_from_model()
             self.exit_special_modes()
         else:
-            QMessageBox.warning(self, "Error", "Could not add port."); self.exit_special_modes()
+            QMessageBox.warning(self, "Error", "Could not add port.")
+            self.exit_special_modes()
 
     def handle_connection_click(self, clicked_item):
         if not isinstance(clicked_item, PortItem): self.exit_special_modes(); return
@@ -345,10 +350,15 @@ class MainWindow(QMainWindow):
             self.pending_port_1 = clicked_item; clicked_item.setBrush(QColor("lime"))
             self.status_bar.showMessage("Connect Mode: Click the second port...")
         else:
-            if self.pending_port_1 == clicked_item: self.exit_special_modes(); return
+            if self.pending_port_1 == clicked_item: 
+                self.exit_special_modes()
+                return
             key1 = (self.pending_port_1.port_model.component.instance_name, self.pending_port_1.port_model.name)
             key2 = (clicked_item.port_model.component.instance_name, clicked_item.port_model.name)
-            self.diagram.create_connection(key1, key2); self.exit_special_modes()
+            self.diagram.create_connection(key1, key2)
+            # FIX: 连接操作也需要刷新场景以显示新的连线
+            self.refresh_scene_from_model()
+            self.exit_special_modes()
 
     # --- Actions triggered from buttons ---
     def merge_selected_ports(self):

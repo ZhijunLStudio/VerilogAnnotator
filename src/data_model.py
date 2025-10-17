@@ -75,7 +75,7 @@ class CircuitDiagram:
     # --- FIX: Restore the 'label' parameter to the method signature ---
     def add_component(self, instance_name, module_type, label, box):
         if instance_name in self.components: return None
-        # Ensure box coordinates are integers if box exists
+        # 如果box存在，确保坐标是整数
         int_box = [int(c) for c in box] if box else None
         comp = Component(instance_name, module_type, label, int_box)
         self.components[instance_name] = comp
@@ -103,8 +103,8 @@ class CircuitDiagram:
         comp = self.components.get(instance_name)
         if instance_name is None:
             base_name = "term"
-            instance_name = self._get_unique_name(base_name + "_port", self.components)
-            # --- FIX: The call now matches the corrected signature ---
+            instance_name = self._get_unique_name(base_name + "_inst", self.components)
+            # --- FIX: 调用现在与修正后的签名匹配 ---
             comp = self.add_component(instance_name, "Terminal", base_name, None)
             
         if not comp: return None
