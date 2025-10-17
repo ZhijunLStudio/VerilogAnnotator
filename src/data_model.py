@@ -11,12 +11,9 @@ class Port:
         self.component = component
         self.position = position 
         self.net = None
-        # This flag is now the SOLE source of truth for saving.
-        # It is ONLY set to True when a user interaction explicitly sets a position.
         self.was_manually_positioned = position is not None
 
 class Component:
-    # ... (unchanged)
     def __init__(self, instance_name, module_type, label, box):
         self.instance_name = instance_name
         self.module_type = module_type
@@ -24,17 +21,12 @@ class Component:
         self.box = box
         self.ports = {}
 
-
 class Net:
-    # ... (unchanged)
     def __init__(self, name):
         self.name = name
         self.connections = [] 
 
-
 class CircuitDiagram:
-    # ... (most methods unchanged, only position updates are affected)
-    # ... (load_files, _get_unique_name, add_component, etc. are the same)
     def __init__(self):
         self.components = {}
         self.nets = {}
@@ -46,12 +38,10 @@ class CircuitDiagram:
     def load_files(self, image_path, verilog_path, metadata_path):
         self.image_path, self.verilog_path, self.metadata_path = image_path, verilog_path, metadata_path
         self.components.clear(); self.nets.clear()
-        
         with open(metadata_path, 'r', encoding='utf-8') as f: meta = json.load(f)
         try:
             first_key = next(iter(meta.get("visual_metadata", {}))); self.top_level_module = first_key.split('.')[0]
         except StopIteration: pass
-
         for instance_path, data in meta.get("visual_metadata", {}).items():
             instance_name = instance_path.split('.')[-1]
             comp = Component(instance_name, "", data.get('label'), data.get('box'))
@@ -60,15 +50,11 @@ class CircuitDiagram:
                 port = Port(port_name, direction, comp, port_data.get('position'))
                 comp.ports[port_name] = port
             self.components[instance_name] = comp
-        
         with open(verilog_path, 'r', encoding='utf-8') as f: verilog_content = f.read()
-        
         instance_pattern = re.compile(r"([\w\\]+)\s+([\w\\]+_(?:inst|port))\s*\((.*?)\);", re.DOTALL)
         port_conn_pattern = re.compile(r"\.(\w+)\s*\((.*?)\)")
-        
         top_module_match = re.search(fr"module\s+{self.top_level_module}\s*;(.*?)endmodule", verilog_content, re.DOTALL)
         search_area = top_module_match.group(1) if top_module_match else verilog_content
-
         for match in instance_pattern.finditer(search_area):
             module_type, instance_name, connections_str = [s.strip() for s in match.groups()]
             if instance_name in self.components:
@@ -86,9 +72,12 @@ class CircuitDiagram:
         while f"{base}_{i}" in existing_keys: i += 1
         return f"{base}_{i}"
 
-    def add_component(self, instance_name, module_type, box):
+    # --- FIX: Restore the 'label' parameter to the method signature ---
+    def add_component(self, instance_name, module_type, label, box):
         if instance_name in self.components: return None
-        comp = Component(instance_name, module_type, instance_name, [int(c) for c in box])
+        # Ensure box coordinates are integers if box exists
+        int_box = [int(c) for c in box] if box else None
+        comp = Component(instance_name, module_type, label, int_box)
         self.components[instance_name] = comp
         return comp
 
@@ -99,17 +88,14 @@ class CircuitDiagram:
             self.delete_port(instance_name, port.name, is_sub_call=True)
         del self.components[instance_name]
 
-
     def update_component_box(self, instance_name, new_box):
         if instance_name in self.components:
-            # COORDINATE FIX: Ensure component box coords are integers
             self.components[instance_name].box = [int(c) for c in new_box]
 
     def update_port_position(self, instance_name, port_name, new_pos):
         comp = self.components.get(instance_name)
         if comp and port_name in comp.ports:
             port = comp.ports[port_name]
-            # COORDINATE FIX: Ensure port coords are integers
             port.position = [int(p) for p in new_pos]
             port.was_manually_positioned = True 
 
@@ -118,6 +104,7 @@ class CircuitDiagram:
         if instance_name is None:
             base_name = "term"
             instance_name = self._get_unique_name(base_name + "_port", self.components)
+            # --- FIX: The call now matches the corrected signature ---
             comp = self.add_component(instance_name, "Terminal", base_name, None)
             
         if not comp: return None
@@ -142,7 +129,7 @@ class CircuitDiagram:
                 if net.name in self.nets: del self.nets[net.name]
         del comp.ports[port_name]
 
-    # merge_ports, split_port, rename_port, create_connection from previous version are correct.
+    # ... The rest of the methods (rename, split, merge, create_connection, save, generate_verilog) are correct and unchanged ...
     def rename_port(self, instance_name, old_name, new_name):
         comp = self.components.get(instance_name)
         if not comp or old_name not in comp.ports: return False
@@ -221,7 +208,6 @@ class CircuitDiagram:
         return True
 
     def save_files(self):
-        # This function correctly uses `was_manually_positioned`, no changes needed here.
         if not self.metadata_path or not self.verilog_path: return False
         try:
             with open(self.verilog_path, 'w', encoding='utf-8') as f: f.write(self._generate_verilog())
@@ -229,13 +215,12 @@ class CircuitDiagram:
             for inst_name, comp in self.components.items():
                 ports_data = { p.name: {"position": p.position} for p in comp.ports.values() if p.was_manually_positioned and p.position is not None }
                 meta_data["visual_metadata"][f"{self.top_level_module}.{inst_name}"] = {"label": comp.label, "box": comp.box, "ports": ports_data}
-            with open(self.metadata_path, 'w', encoding='utf-8') as f: json.dump(meta_data, f, indent=2)
+            with open(self.metadata_path, 'w', encoding='utf-8') as f: json.dump(meta_data, f, indent=2, ensure_ascii=False)
             return True
         except Exception as e:
             print(f"[ERROR] Failed to save files: {e}"); return False
 
     def _generate_verilog(self):
-        # This function is also correct and needs no changes.
         module_definitions = defaultdict(lambda: defaultdict(list))
         for comp in self.components.values():
             if comp.module_type:
