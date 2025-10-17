@@ -162,8 +162,10 @@ class MainWindow(QMainWindow):
         ops_layout.addWidget(self.btn_add_port_in); ops_layout.addWidget(self.btn_add_port_out)
         ops_layout.addWidget(self.btn_merge_ports); ops_layout.addWidget(self.btn_rename_port)
         ops_layout.addWidget(self.btn_split_port)
-        right_layout.addWidget(prop_group); right_layout.addWidget(ops_group)
+        right_layout.addWidget(prop_group)
         right_layout.addStretch(1)
+        right_layout.addWidget(ops_group)
+        
 
         main_splitter.addWidget(left_panel); main_splitter.addWidget(self.view); main_splitter.addWidget(right_panel)
         main_splitter.setSizes([250, 1200, 350])
