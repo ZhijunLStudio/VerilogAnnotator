@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QInputDialog, QGraphicsItem, QFileDialog, QGroupBox,
     QMenu
 )
-from PyQt6.QtGui import QPainter, QAction, QKeySequence, QPixmap, QPen, QColor, QCursor
+from PyQt6.QtGui import QPainter, QAction, QKeySequence, QPixmap, QPen, QColor, QCursor, QBrush
 from PyQt6.QtCore import Qt, QPointF, QRectF
 
 from ..data_model import CircuitDiagram
@@ -24,18 +24,43 @@ class EditableGraphicsView(QGraphicsView):
         self.temp_line = None
 
     def mousePressEvent(self, event):
+        scene_pos = self.mapToScene(event.pos())
+
         if self.drawing_mode:
-            item = self.itemAt(event.pos())
-            scene_pos = self.mapToScene(event.pos())
-            
             if self.drawing_mode in ['add_input', 'add_output']:
                 self.main_window.handle_add_port_click(scene_pos)
+            
+            # --- FIX: New, robust connection logic with snap-to-port ---
             elif self.drawing_mode == 'connect':
-                self.main_window.handle_connection_click(item)
+                target_port = None
+                
+                # First, try a direct hit
+                item_under_cursor = self.itemAt(event.pos())
+                if isinstance(item_under_cursor, PortItem):
+                    target_port = item_under_cursor
+                else:
+                    # If direct hit fails, search for the nearest port in a radius
+                    search_rect = QRectF(scene_pos - QPointF(10, 10), scene_pos + QPointF(10, 10))
+                    nearby_items = self.scene().items(search_rect)
+                    port_items = [item for item in nearby_items if isinstance(item, PortItem)]
+                    
+                    if port_items:
+                        # Find the closest one
+                        min_dist = float('inf')
+                        for port in port_items:
+                            dist = math.hypot(port.scenePos().x() - scene_pos.x(), port.scenePos().y() - scene_pos.y())
+                            if dist < min_dist:
+                                min_dist = dist
+                                target_port = port
+                
+                # Pass the found port (or None if nothing is nearby) to the handler
+                self.main_window.handle_connection_click(target_port)
+
             elif self.drawing_mode == 'component_draw' and event.button() == Qt.MouseButton.LeftButton:
                 self.start_pos = scene_pos
                 rect = QRectF(self.start_pos, self.start_pos)
                 self.temp_rect = self.scene().addRect(rect, QPen(QColor("gold"), 2, Qt.PenStyle.DashLine))
+            
             event.accept()
             return
 
@@ -307,10 +332,19 @@ class MainWindow(QMainWindow):
                 item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, not is_comp_mode)
 
     def exit_special_modes(self):
-        if self.pending_port_1: self.refresh_scene_from_model()
-        self.pending_port_1 = None
+        # If there was a pending connection, reset its color without a full refresh
+        if self.pending_port_1:
+            p_model = self.pending_port_1.port_model
+            original_color = {'input': QColor("#D32F2F"), 'output': QColor("#388E3C")}.get(p_model.direction, QColor("#F57C00"))
+            self.pending_port_1.setBrush(QBrush(original_color))
+            self.pending_port_1 = None
+
+        # Clean up temporary drawing items
         if self.view.temp_line:
-            self.scene.removeItem(self.view.temp_line); self.view.temp_line = None
+            self.scene.removeItem(self.view.temp_line)
+            self.view.temp_line = None
+        
+        # Reset cursor and status message
         self.view.drawing_mode = None
         self.view.setCursor(Qt.CursorShape.ArrowCursor)
         self.status_bar.showMessage(f"Mode: {'Component' if self.edit_mode == 'component' else 'Port'}")
@@ -345,20 +379,40 @@ class MainWindow(QMainWindow):
             self.exit_special_modes()
 
     def handle_connection_click(self, clicked_item):
-        if not isinstance(clicked_item, PortItem): self.exit_special_modes(); return
+        # The view now gives us a valid PortItem or None
+        if not clicked_item:
+            self.exit_special_modes()
+            return
+
         if not self.pending_port_1:
-            self.pending_port_1 = clicked_item; clicked_item.setBrush(QColor("lime"))
+            # First port clicked
+            self.pending_port_1 = clicked_item
+            clicked_item.setBrush(QColor("lime")) # Highlight
             self.status_bar.showMessage("Connect Mode: Click the second port...")
         else:
-            if self.pending_port_1 == clicked_item: 
-                self.exit_special_modes()
+            # Second port clicked
+            if self.pending_port_1 == clicked_item:
+                self.exit_special_modes() # Cancel if same port clicked twice
                 return
-            key1 = (self.pending_port_1.port_model.component.instance_name, self.pending_port_1.port_model.name)
-            key2 = (clicked_item.port_model.component.instance_name, clicked_item.port_model.name)
-            self.diagram.create_connection(key1, key2)
-            # FIX: 连接操作也需要刷新场景以显示新的连线
-            self.refresh_scene_from_model()
-            self.exit_special_modes()
+
+            # Perform the surgical update (this logic from before was correct)
+            p1_model = self.pending_port_1.port_model
+            p2_model = clicked_item.port_model
+            key1 = (p1_model.component.instance_name, p1_model.name)
+            key2 = (p2_model.component.instance_name, p2_model.name)
+            if self.diagram.create_connection(key1, key2):
+                line = ConnectionLineItem(self.pending_port_1, clicked_item)
+                self.scene.addItem(line)
+                line.update_path()
+                
+                # Update tooltips
+                net_name = p1_model.net.name
+                tooltip1 = f"Port: {p1_model.name}\nNet: {net_name}\nType: {p1_model.direction}"
+                tooltip2 = f"Port: {p2_model.name}\nNet: {net_name}\nType: {p2_model.direction}"
+                self.pending_port_1.setToolTip(tooltip1)
+                clicked_item.setToolTip(tooltip2)
+
+            self.exit_special_modes() # Cleans up highlighting and state safely
 
     # --- Actions triggered from buttons ---
     def merge_selected_ports(self):

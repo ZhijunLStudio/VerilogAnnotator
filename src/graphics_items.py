@@ -1,3 +1,5 @@
+# src/graphics_items.py
+
 from PyQt6.QtWidgets import QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsItem, QGraphicsTextItem
 from PyQt6.QtGui import QPen, QBrush, QColor, QPainterPath, QCursor
 from PyQt6.QtCore import Qt, QRectF
@@ -5,50 +7,52 @@ from PyQt6.QtCore import Qt, QRectF
 class PortItem(QGraphicsEllipseItem):
     def __init__(self, port_model, parent_item=None):
         super().__init__(-5, -5, 10, 10, parent=parent_item)
-        self.port_model = port_model; self.connection_lines = []
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable); self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges); self.setAcceptHoverEvents(True)
+        self.port_model = port_model
+        self.connection_lines = []
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
+        self.setAcceptHoverEvents(True)
         color = {'input': QColor("#D32F2F"), 'output': QColor("#388E3C")}.get(port_model.direction, QColor("#F57C00"))
-        self.setBrush(QBrush(color)); self.setPen(QPen(QColor("black"), 1))
+        self.setBrush(QBrush(color))
+        self.setPen(QPen(QColor("black"), 1))
         self.label = QGraphicsTextItem(port_model.name, parent=self)
-        self.label.setDefaultTextColor(QColor("#00008B")); font = self.label.font(); font.setPointSize(8); self.label.setFont(font)
+        self.label.setDefaultTextColor(QColor("#00008B"))
+        font = self.label.font()
+        font.setPointSize(8)
+        self.label.setFont(font)
         self.label.setPos(10, -8)
         net_name = port_model.net.name if port_model.net else "N/A"
         self.setToolTip(f"Port: {port_model.name}\nNet: {net_name}\nType: {port_model.direction}")
 
-    # --- FINAL, ROBUST FIX ---
     def itemChange(self, change, value):
-        # First, check for the dangerous notification. If it's found,
-        # handle it and exit the function immediately. DO NOT call super().
-        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
-            if self.scene():
-                new_scene_pos = self.scenePos()
-                self.scene().parent().diagram.update_port_position(
-                    self.port_model.component.instance_name, self.port_model.name,
-                    [new_scene_pos.x(), new_scene_pos.y()]
-                )
-                for line in self.connection_lines:
-                    line.update_path()
-            # The return value is ignored for this notification.
-            return value
-
-        # If the dangerous case was not met, proceed with other checks.
-        # This one is safe to pass to super() later.
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene() and self.parentItem():
             parent_rect = self.parentItem().boundingRect()
             value.setX(max(parent_rect.left(), min(value.x(), parent_rect.right())))
             value.setY(max(parent_rect.top(), min(value.y(), parent_rect.bottom())))
-            # The modified 'value' will be passed to super() below.
 
-        # Finally, for all safe cases, call the base class implementation.
-        return super().itemChange(change, value)
+        try:
+            result = super().itemChange(change, value)
+        except TypeError:
+            result = value
+
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged and self.scene():
+            new_scene_pos = self.scenePos()
+            self.scene().parent().diagram.update_port_position(
+                self.port_model.component.instance_name, self.port_model.name,
+                [new_scene_pos.x(), new_scene_pos.y()]
+            )
+            for line in self.connection_lines:
+                line.update_path()
+        
+        return result
 
     def hoverEnterEvent(self, event): self.setPen(QPen(QColor("gold"), 2)); super().hoverEnterEvent(event)
     def hoverLeaveEvent(self, event): self.setPen(QPen(QColor("black"), 1)); super().hoverLeaveEvent(event)
 
 
+# --- FIX: ResizeHandle class must be defined BEFORE ComponentItem ---
 class ResizeHandle(QGraphicsRectItem):
-    # This class is correct and does not need changes.
     def __init__(self, parent, position_flags):
         super().__init__(-4, -4, 8, 8, parent)
         self.parent = parent
@@ -85,7 +89,9 @@ class ComponentItem(QGraphicsRectItem):
             height = component_model.box[3] - component_model.box[1]
             super().__init__(0, 0, width, height)
         else:
-            super().__init__(0, 0, 0, 0); self.setVisible(False)
+            super().__init__(0, 0, 0, 0)
+            self.setVisible(False)
+            
         self.component_model = component_model
         self.handles = {}
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable); self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
@@ -102,7 +108,7 @@ class ComponentItem(QGraphicsRectItem):
             self.handles[pos_flag] = ResizeHandle(self, pos_flag)
             
         self.update_handle_positions(); self.set_handles_visible(False)
-
+        
     def set_handles_visible(self, visible):
         is_active = visible and self.scene() and self.scene().parent().edit_mode == 'component' and self.isSelected()
         for handle in self.handles.values():
@@ -131,35 +137,31 @@ class ComponentItem(QGraphicsRectItem):
             if isinstance(child, PortItem):
                 for line in child.connection_lines:
                     line.update_path()
-
-    # --- FINAL, ROBUST FIX ---
+                    
     def itemChange(self, change, value):
-        # First, check for the dangerous notification. If it's found,
-        # handle it and exit the function immediately. DO NOT call super().
-        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
-            if self.scene():
-                diagram = self.scene().parent().diagram
-                pos = self.pos(); rect = self.rect()
-                diagram.update_component_box(self.component_model.instance_name, [pos.x(), pos.y(), pos.x() + rect.width(), pos.y() + rect.height()])
-                for child in self.childItems():
-                    if isinstance(child, PortItem):
-                        child_scene_pos = child.scenePos()
-                        diagram.update_port_position(
-                            child.port_model.component.instance_name, child.port_model.name,
-                            [child_scene_pos.x(), child_scene_pos.y()]
-                        )
-                        for line in child.connection_lines:
-                            line.update_path()
-            return value
+        try:
+            result = super().itemChange(change, value)
+        except TypeError:
+            result = value
 
-        # If the dangerous case was not met, proceed with other checks.
-        # This one is safe to pass to super() later.
-        if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged and self.scene():
+            diagram = self.scene().parent().diagram
+            pos = self.pos(); rect = self.rect()
+            diagram.update_component_box(self.component_model.instance_name, [pos.x(), pos.y(), pos.x() + rect.width(), pos.y() + rect.height()])
+            for child in self.childItems():
+                if isinstance(child, PortItem):
+                    child_scene_pos = child.scenePos()
+                    diagram.update_port_position(
+                        child.port_model.component.instance_name, child.port_model.name,
+                        [child_scene_pos.x(), child_scene_pos.y()]
+                    )
+                    for line in child.connection_lines:
+                        line.update_path()
+        elif change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
             self.set_handles_visible(bool(value))
 
-        # Finally, for all safe cases, call the base class implementation.
-        return super().itemChange(change, value)
-
+        return result
+            
     def hoverEnterEvent(self, event):
         if self.isSelected(): self.set_handles_visible(True)
         super().hoverEnterEvent(event)
@@ -175,9 +177,7 @@ class ComponentItem(QGraphicsRectItem):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(self.boundingRect())
 
-
 class ConnectionLineItem(QGraphicsPathItem):
-    # This class is correct and unchanged
     def __init__(self, source_port_item, dest_port_item):
         super().__init__()
         self.source_port = source_port_item; self.dest_port = dest_port_item
