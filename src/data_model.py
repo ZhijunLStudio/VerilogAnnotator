@@ -9,9 +9,8 @@ class Port:
         self.name = name
         self.direction = direction
         self.component = component
-        self.position = position # If None, it means no user-defined position exists.
+        self.position = position 
         self.net = None
-        # This new flag tracks if the user has explicitly moved the port.
         self.was_manually_positioned = position is not None
 
 class Component:
@@ -25,7 +24,7 @@ class Component:
 class Net:
     def __init__(self, name):
         self.name = name
-        self.connections = [] # List of Port objects
+        self.connections = [] 
 
 class CircuitDiagram:
     def __init__(self):
@@ -37,6 +36,7 @@ class CircuitDiagram:
         self.top_level_module = "top_level_system"
         print("[DEBUG] New CircuitDiagram object created.")
 
+    # ... (load_files 和其他未改变的方法保持不变) ...
     def load_files(self, image_path, verilog_path, metadata_path):
         print(f"[DEBUG] Loading files: IMG='{image_path.name}', V='{verilog_path.name}', META='{metadata_path.name}'")
         self.image_path, self.verilog_path, self.metadata_path = image_path, verilog_path, metadata_path
@@ -50,6 +50,7 @@ class CircuitDiagram:
         for instance_path, data in meta.get("visual_metadata", {}).items():
             instance_name = instance_path.split('.')[-1]
             comp = Component(instance_name, "", data.get('label'), data.get('box'))
+            # 修正：即使 "ports" 键不存在，也要处理，避免崩溃
             for port_name, port_data in data.get("ports", {}).items():
                 direction = 'input' if 'in' in port_name.lower() else 'output'
                 port = Port(port_name, direction, comp, port_data.get('position'))
@@ -108,11 +109,10 @@ class CircuitDiagram:
         if comp and port_name in comp.ports:
             port = comp.ports[port_name]
             port.position = [round(p, 2) for p in new_pos]
-            port.was_manually_positioned = True # Mark as moved by user
+            port.was_manually_positioned = True 
 
     def add_port(self, instance_name, direction, position=None):
         comp = self.components.get(instance_name)
-        # If instance_name is None, create a new terminal component
         if instance_name is None:
             base_name = "term"
             instance_name = self._get_unique_name(base_name + "_port", self.components)
@@ -141,14 +141,16 @@ class CircuitDiagram:
             if port_to_delete in net.connections: net.connections.remove(port_to_delete)
             if len(net.connections) < 2:
                 for p in net.connections: p.net = None
-                if net.name in self.nets: del self.nets[net.name]
+                if net.name in self.nets: 
+                    print(f"[DEBUG] Deleting dangling net: {net.name}")
+                    del self.nets[net.name]
         
         del comp.ports[port_name]
 
     def rename_port(self, instance_name, old_name, new_name):
         comp = self.components.get(instance_name)
         if not comp or old_name not in comp.ports: return False
-        if new_name in comp.ports: return False # New name already exists
+        if new_name in comp.ports: return False 
         
         print(f"[DEBUG] Renaming port '{instance_name}.{old_name}' to '{new_name}'")
         port = comp.ports.pop(old_name)
@@ -163,7 +165,6 @@ class CircuitDiagram:
         original_port = comp.ports[port_name]
         print(f"[DEBUG] Splitting port '{instance_name}.{port_name}'")
         
-        # Create two new ports
         name1 = self._get_unique_name(original_port.name, comp.ports)
         port1 = Port(name1, original_port.direction, comp, original_port.position)
         if port1.position: port1.position = [port1.position[0] - 5, port1.position[1] - 5]
@@ -176,7 +177,6 @@ class CircuitDiagram:
         port2.was_manually_positioned = original_port.was_manually_positioned
         comp.ports[name2] = port2
 
-        # Re-link nets
         if original_port.net:
             net = original_port.net
             net.connections.remove(original_port)
@@ -198,26 +198,86 @@ class CircuitDiagram:
             print("[WARN] Cannot merge ports from different components or with different directions.")
             return False
 
-        print(f"[DEBUG] Merging ports '{inst1}.{name1}' and '{inst2}.{name2}'")
+        print(f"[DEBUG] Merging ports '{inst1}.{name1}' and '{inst2}.{name2}' into '{name1}'")
         
-        # Keep port1, delete port2. Inherit connections.
-        if port2.net:
-            if port1.net and port1.net != port2.net:
-                # Complex case: merging two different nets
-                net1, net2 = port1.net, port2.net
-                for p in list(net2.connections):
-                    p.net = net1
-                    net1.connections.append(p)
-                if net2.name in self.nets: del self.nets[net2.name]
-            elif not port1.net:
-                port1.net = port2.net
-                port1.net.connections.append(port1)
-            port2.net.connections.remove(port2)
+        # We keep port1 and delete port2.
+        
+        net1, net2 = port1.net, port2.net
+        
+        # Disconnect port2 from its net before deleting it
+        if net2:
+            net2.connections.remove(port2)
 
+        # Merge nets if they are different
+        if net1 and net2 and net1 != net2:
+            print(f"[DEBUG] Merging net '{net2.name}' into '{net1.name}'")
+            # Move all remaining connections from net2 to net1
+            for p in list(net2.connections):
+                p.net = net1
+                net1.connections.append(p)
+            # Delete the now empty net2
+            if net2.name in self.nets:
+                del self.nets[net2.name]
+        elif net2 and not net1:
+            # If port1 had no net, it joins port2's net
+            print(f"[DEBUG] Port '{name1}' joining net '{net2.name}'")
+            port1.net = net2
+            net2.connections.append(port1)
+
+        # Finally, delete port2 from the component
         del comp2.ports[name2]
         return True
+        
+    def create_connection(self, key1, key2):
+        """Connects two ports, handling all net-related logic."""
+        inst1, name1 = key1; inst2, name2 = key2
+        comp1 = self.components.get(inst1); comp2 = self.components.get(inst2)
+        if not comp1 or not comp2 or name1 not in comp1.ports or name2 not in comp2.ports: return False
+        
+        port1 = comp1.ports[name1]; port2 = comp2.ports[name2]
 
+        net1, net2 = port1.net, port2.net
 
+        if net1 and net1 == net2:
+            print("[INFO] Ports are already in the same net.")
+            return True # Nothing to do
+
+        print(f"[DEBUG] Creating connection between '{inst1}.{name1}' and '{inst2}.{name2}'")
+
+        if not net1 and not net2:
+            # Case 1: Both ports are unconnected
+            new_net_name = self._get_unique_name("net", self.nets)
+            new_net = Net(new_net_name)
+            self.nets[new_net_name] = new_net
+            new_net.connections.extend([port1, port2])
+            port1.net = new_net
+            port2.net = new_net
+            print(f"[DEBUG] Created new net '{new_net_name}' for the two ports.")
+        
+        elif net1 and not net2:
+            # Case 2: Port1 is in a net, port2 is not
+            net1.connections.append(port2)
+            port2.net = net1
+            print(f"[DEBUG] Added port '{name2}' to existing net '{net1.name}'.")
+
+        elif not net1 and net2:
+            # Case 3: Port2 is in a net, port1 is not
+            net2.connections.append(port1)
+            port1.net = net2
+            print(f"[DEBUG] Added port '{name1}' to existing net '{net2.name}'.")
+
+        elif net1 and net2 and net1 != net2:
+            # Case 4: Both ports are in different nets -> merge nets
+            print(f"[DEBUG] Merging net '{net2.name}' into '{net1.name}'.")
+            for p in list(net2.connections):
+                p.net = net1
+                net1.connections.append(p)
+            if net2.name in self.nets:
+                del self.nets[net2.name]
+
+        return True
+
+    # ... (save_files and _generate_verilog unchanged) ...
     def save_files(self):
         if not self.metadata_path or not self.verilog_path:
             print("[WARN] Paths not set. Cannot save."); return False
@@ -231,8 +291,8 @@ class CircuitDiagram:
                 "net_metadata": {}
             }
             for inst_name, comp in self.components.items():
-                comp_data = {"label": comp.label, "box": comp.box}
-                # CORE CHANGE: Only save port positions if they were manually set
+                comp_data = {"label": comp.label, "box": comp.box, "ports": {}} # Ensure ports key exists
+                
                 ports_with_pos = {
                     p.name: {"position": p.position} 
                     for p in comp.ports.values() 
@@ -240,6 +300,8 @@ class CircuitDiagram:
                 }
                 if ports_with_pos:
                     comp_data["ports"] = ports_with_pos
+                
+                # Ensure component is saved even if it has no positioned ports
                 meta_data["visual_metadata"][f"{self.top_level_module}.{inst_name}"] = comp_data
             
             with open(self.metadata_path, 'w', encoding='utf-8') as f: json.dump(meta_data, f, indent=2)
@@ -249,7 +311,6 @@ class CircuitDiagram:
             print(f"[ERROR] Failed to save files: {e}"); return False
 
     def _generate_verilog(self):
-        # (This function remains unchanged, it correctly generates from the model state)
         module_definitions = defaultdict(lambda: defaultdict(list))
         for comp in self.components.values():
             if comp.module_type:
