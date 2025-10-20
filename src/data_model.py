@@ -1,4 +1,3 @@
-# src/data_model.py
 import json
 import re
 from pathlib import Path
@@ -61,11 +60,32 @@ class CircuitDiagram:
             label = data.get("label")
             comp = Component(instance_name, None, label, data.get('box'))
             
+            # --- START MODIFICATION (Robustness Enhancement) ---
+            # 即使 module_type 未定义，也尝试根据标签或实例名猜测是否为终端
+            is_input_terminal_heuristic = comp.module_type == "InputPort" or "input" in str(label).lower() or "port" in instance_name.lower() and "in" in str(label).lower()
+            is_output_terminal_heuristic = comp.module_type == "OutputPort" or "output" in str(label).lower() or "port" in instance_name.lower() and "out" in str(label).lower()
+            # --- END MODIFICATION ---
+
             for port_name, port_data in data.get("ports", {}).items():
                 sane_port_name = sanitize_for_verilog(port_name)
-                direction = 'output' if 'out' in sane_port_name.lower() else 'input'
-                port = Port(sane_port_name, direction, comp, port_data.get('position'), port_data.get('label'))
-                comp.ports[sane_port_name] = port
+                
+                # --- START MODIFICATION (Robustness Enhancement) ---
+                # 强制修正 Input/OutputPort 的内部端口名，以修复不规范的旧 meta 文件
+                final_port_name = sane_port_name
+                final_direction = 'output' if 'out' in sane_port_name.lower() else 'input'
+
+                if is_input_terminal_heuristic and not is_output_terminal_heuristic:
+                    final_port_name = 'out_0'
+                    final_direction = 'output'
+                    comp.module_type = "InputPort" # 顺便修正 module_type
+                elif is_output_terminal_heuristic and not is_input_terminal_heuristic:
+                    final_port_name = 'in_0'
+                    final_direction = 'input'
+                    comp.module_type = "OutputPort" # 顺便修正 module_type
+                # --- END MODIFICATION ---
+                
+                port = Port(final_port_name, final_direction, comp, port_data.get('position'), port_data.get('label', port_name))
+                comp.ports[final_port_name] = port
             self.components[instance_name] = comp
         
         try:
@@ -108,6 +128,11 @@ class CircuitDiagram:
             if instance_name in self.components:
                 comp = self.components[instance_name]
                 comp.module_type = module_type
+                
+                #
+                # Verilog parsing should not override the corrected module types for terminals
+                if comp.module_type not in ("InputPort", "OutputPort"):
+                    comp.module_type = module_type
                 
                 for port_name, port in comp.ports.items():
                     if port_name in port_directions[module_type]:
@@ -152,16 +177,34 @@ class CircuitDiagram:
         else:
             inst_name_base = sane_label + "_port"
             instance_name = self._get_unique_name(inst_name_base, self.components)
+            # Note: The direction is counter-intuitive. An 'input' terminal is a source from the top-level view,
+            # so its module type is 'InputPort' and its port direction is 'output'.
             module_type = "InputPort" if direction == "input" else "OutputPort"
             target_comp = self.add_component(instance_name, module_type, label, None)
         
         if not target_comp: return None
 
-        port_name = self._get_unique_name(sane_label, target_comp.ports)
+        # --- START MODIFICATION ---
+        # Core Fix: Ensure InputPort/OutputPort have fixed port names
+        port_name = ""
+        final_direction = direction
         
-        if target_comp.module_type == "InputPort": final_direction = 'output'
-        elif target_comp.module_type == "OutputPort": final_direction = 'input'
-        else: final_direction = direction
+        if target_comp.module_type == "InputPort":
+            final_direction = 'output'
+            port_name = 'out_0'  # Fixed port name
+        elif target_comp.module_type == "OutputPort":
+            final_direction = 'input'
+            port_name = 'in_0'   # Fixed port name
+        else:
+            # For regular components, maintain the original logic
+            port_name = self._get_unique_name(sane_label, target_comp.ports)
+        
+        # If the port name already exists (for Input/OutputPort, this means the component already has its port),
+        # we should not add a duplicate.
+        if port_name in target_comp.ports:
+            print(f"[Warning] Port '{port_name}' already exists on '{target_comp.instance_name}'. Cannot add new port.")
+            return None
+        # --- END MODIFICATION ---
 
         port = Port(port_name, final_direction, target_comp, position, label)
         if position:
@@ -199,16 +242,19 @@ class CircuitDiagram:
         if not (comp and port_name in comp.ports): return False
         port = comp.ports[port_name]
         port.label = new_label
+
+        # --- START MODIFICATION ---
+        # Core Fix: When renaming a terminal, only change instance name and label, not the internal port name
         if comp.module_type in ("InputPort", "OutputPort"):
             comp.label = new_label
-            new_port_name = self._get_unique_name(sanitize_for_verilog(new_label), {p:v for p,v in comp.ports.items() if p != port_name})
-            port.name = new_port_name
-            comp.ports[new_port_name] = comp.ports.pop(port_name)
+            # Only update the component instance name; port.name (in_0/out_0) remains unchanged
             new_inst_name = self._get_unique_name(new_label + "_port", {k:v for k,v in self.components.items() if k != instance_name})
             if new_inst_name != instance_name:
                 self.components[new_inst_name] = self.components.pop(instance_name)
                 comp.instance_name = new_inst_name
+        # --- END MODIFICATION ---
         return True
+    
     def merge_ports(self, key1, key2):
         inst1, name1 = key1; inst2, name2 = key2
         if inst1 != inst2: return False
@@ -231,7 +277,6 @@ class CircuitDiagram:
         comp1 = self.components.get(inst1); comp2 = self.components.get(inst2)
         if not comp1 or not comp2 or name1 not in comp1.ports or name2 not in comp2.ports: return False
         
-        # MODIFIED: CRITICAL FIX for the UnboundLocalError
         port1 = comp1.ports[name1]; port2 = comp2.ports[name2]
 
         net1, net2 = port1.net, port2.net
@@ -254,6 +299,17 @@ class CircuitDiagram:
         label_key = "--".join(key_tuple)
         if text: self.connection_labels[label_key] = {"text": text}
         elif label_key in self.connection_labels: del self.connection_labels[label_key]
+
+    def split_port(self, instance_name, port_name):
+        """
+        Placeholder method for the split port functionality.
+        Currently, it only prints a message and returns failure.
+        A full implementation would require complex logic to create a new port
+        and handle the net connections of the original port.
+        """
+        print(f"Functionality not implemented: Split port {instance_name}.{port_name}")
+        # Add specific implementation logic here in the future
+        return False
 
     def save_files(self):
         if not self.metadata_path or not self.verilog_path: return False

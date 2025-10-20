@@ -1,5 +1,5 @@
-# src/ui/main_window.py
 import math
+import re
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QGraphicsView, 
@@ -15,7 +15,6 @@ from .style import DARK_THEME
 from ..graphics_items import ComponentItem, PortItem, ConnectionLineItem, ConnectionLabelItem
 
 class EditableGraphicsView(QGraphicsView):
-    # This class remains unchanged
     def __init__(self, scene, main_window):
         super().__init__(scene)
         self.main_window = main_window
@@ -245,7 +244,6 @@ class MainWindow(QMainWindow):
         if not pixmap.isNull(): 
             self.scene.addPixmap(pixmap)
         
-        # Steps 1-3 remain the same: create components, calculate port positions, create port items
         for inst_name, comp_model in self.diagram.components.items():
             comp_item = ComponentItem(comp_model)
             self.scene.addItem(comp_item)
@@ -295,7 +293,6 @@ class MainWindow(QMainWindow):
                     else:
                         port_item.setPos(QPointF(*p_model.position))
         
-        # MODIFIED: Reworked connection drawing logic
         all_lines = []
         for net in self.diagram.nets.values():
             ports_in_net = [self.port_items.get((p.component.instance_name, p.name)) for p in net.connections]
@@ -304,7 +301,6 @@ class MainWindow(QMainWindow):
             if len(ports_in_net) < 2:
                 continue
 
-            # --- Start of Minimum Spanning Tree (Prim's Algorithm) Logic ---
             num_ports = len(ports_in_net)
             in_tree = [False] * num_ports
             distance = [float('inf')] * num_ports
@@ -334,7 +330,6 @@ class MainWindow(QMainWindow):
                     self.scene.addItem(line)
                     line.update_path()
                     all_lines.append(line)
-            # --- End of MST Logic ---
 
         for line in all_lines:
             p1_model, p2_model = line.source_port.port_model, line.dest_port.port_model
@@ -352,8 +347,6 @@ class MainWindow(QMainWindow):
         self.set_edit_mode(self.edit_mode, force_update=True)
         self.on_selection_changed()
     
-    # All other methods from handle_connection_click onwards are unchanged from the previous fix.
-    # I am including them for completeness.
     def on_selection_changed(self):
         selected_items = self.scene.selectedItems()
         selected_ports = [item for item in selected_items if isinstance(item, PortItem)]
@@ -485,15 +478,37 @@ class MainWindow(QMainWindow):
              QMessageBox.information(self, "Split Port", "Only ports belonging to a regular component can be split.")
              return
         port_model = selected[0].port_model
-        if self.diagram.split_port(port_model.component.instance_name, port_model.name): self.refresh_scene_from_model()
+        if self.diagram.split_port(port_model.component.instance_name, port_model.name):
+            self.refresh_scene_from_model()
+        else:
+            QMessageBox.information(self, "Not Implemented", "The split port functionality is not yet implemented.")
         
     def create_new_component_at(self, box_rect):
-        text, ok = QInputDialog.getText(self, 'New Component', 'Enter component label:')
-        if not (ok and text): return
-        label = text.strip(); instance_name = label.replace(' ', '_') + "_inst"; module_type = label.replace(' ', '_')
+        # --- START MODIFICATION ---
+        # Core Fix: Distinguish between "instance label" and "module type"
+        
+        # 1. Get the instance label
+        label, ok1 = QInputDialog.getText(self, 'New Component Step 1/2', 'Enter instance label (e.g., my_adder_1):')
+        if not (ok1 and label): return
+        label = label.strip()
+
+        # 2. Get the module type
+        # Suggest a default module type to the user for convenience
+        suggested_module_type = re.sub(r'_\d+$', '', label) # Attempt to remove trailing numbers
+        module_type, ok2 = QInputDialog.getText(self, 'New Component Step 2/2', 'Enter module type (e.g., Adder):', text=suggested_module_type)
+        if not (ok2 and module_type): return
+        module_type = module_type.strip()
+
+        # 3. Generate the instance name from the label
+        instance_name = label.replace(' ', '_') + "_inst"
+        # --- END MODIFICATION ---
+
         if self.diagram.components.get(instance_name):
             QMessageBox.warning(self, "Error", "An instance with this name already exists."); return
+        
         box = [box_rect.left(), box_rect.top(), box_rect.right(), box_rect.bottom()]
+        
+        # Use the user-specified module_type
         if self.diagram.add_component(instance_name, module_type, label, box):
             self.refresh_scene_from_model()
             if instance_name in self.component_items: self.component_items[instance_name].setSelected(True)
