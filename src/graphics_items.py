@@ -11,14 +11,23 @@ class PortItem(QGraphicsEllipseItem):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable); self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges); self.setAcceptHoverEvents(True)
         color = {'input': QColor("#D32F2F"), 'output': QColor("#388E3C")}.get(port_model.direction, QColor("#F57C00"))
-        self.setBrush(QBrush(color)); self.setPen(QPen(QColor("black"), 1))
+        self.setBrush(QBrush(color))
         
+        if port_model.was_manually_positioned:
+            self.setPen(QPen(QColor("black"), 1))
+        else:
+            self.setPen(QPen(QColor("cyan"), 1.5, Qt.PenStyle.DashLine))
+
         self.label = QGraphicsTextItem(port_model.label, parent=self)
         self.label.setDefaultTextColor(QColor("#00008B")); font = self.label.font(); font.setPointSize(8); self.label.setFont(font)
         self.label.setPos(10, -8)
         
-        net_name = port_model.net.name if port_model.net else "N/A"
-        self.setToolTip(f"Label: {port_model.label}\nName: {port_model.name}\nNet: {net_name}\nType: {port_model.direction}")
+        self.update_tooltip()
+
+    def update_tooltip(self):
+        net_name = self.port_model.net.name if self.port_model.net else "N/A"
+        pos_status = "Manual" if self.port_model.was_manually_positioned else "Auto"
+        self.setToolTip(f"Label: {self.port_model.label}\nName: {self.port_model.name}\nNet: {net_name}\nType: {self.port_model.direction}\nPosition: {pos_status}")
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene() and self.parentItem():
@@ -35,14 +44,22 @@ class PortItem(QGraphicsEllipseItem):
                 self.port_model.component.instance_name, self.port_model.name,
                 [new_scene_pos.x(), new_scene_pos.y()]
             )
+            self.setPen(QPen(QColor("black"), 1))
+            self.update_tooltip()
             for line in self.connection_lines:
                 line.update_path()
         return result
 
     def hoverEnterEvent(self, event): self.setPen(QPen(QColor("gold"), 2)); super().hoverEnterEvent(event)
-    def hoverLeaveEvent(self, event): self.setPen(QPen(QColor("black"), 1)); super().hoverLeaveEvent(event)
+    def hoverLeaveEvent(self, event):
+        if self.port_model.was_manually_positioned:
+             self.setPen(QPen(QColor("black"), 1))
+        else:
+             self.setPen(QPen(QColor("cyan"), 1.5, Qt.PenStyle.DashLine))
+        super().hoverLeaveEvent(event)
 
 class ResizeHandle(QGraphicsRectItem):
+    # ... (此部分无变化)
     def __init__(self, parent, position_flags):
         super().__init__(-4, -4, 8, 8, parent)
         self.parent = parent
@@ -68,7 +85,7 @@ class ResizeHandle(QGraphicsRectItem):
                 self._is_resizing = False
             return self.pos()
         return super().itemChange(change, value)
-
+        
 class ComponentItem(QGraphicsRectItem):
     Handle_TopLeft = 1; Handle_TopRight = 2; Handle_BottomRight = 4; Handle_BottomLeft = 8
     def __init__(self, component_model):
@@ -128,7 +145,14 @@ class ComponentItem(QGraphicsRectItem):
             for child in self.childItems():
                 if isinstance(child, PortItem):
                     child_scene_pos = child.scenePos()
+                    # Update model
                     diagram.update_port_position(child.port_model.component.instance_name, child.port_model.name, [child_scene_pos.x(), child_scene_pos.y()])
+                    
+                    # MODIFIED: CRITICAL FIX - Manually update the PortItem's visual state
+                    # because its own itemChange event doesn't fire when the parent moves.
+                    child.setPen(QPen(QColor("black"), 1))
+                    child.update_tooltip()
+                    
                     for line in child.connection_lines: line.update_path()
         elif change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
             self.set_handles_visible(bool(value))
@@ -147,6 +171,7 @@ class ComponentItem(QGraphicsRectItem):
             painter.drawRect(self.boundingRect())
 
 class ConnectionLabelItem(QGraphicsSimpleTextItem):
+    # ... (此部分无变化)
     def __init__(self, text, connection_line_item):
         super().__init__(text)
         self.connection_line = connection_line_item
@@ -158,6 +183,7 @@ class ConnectionLabelItem(QGraphicsSimpleTextItem):
         self.setPos(mid_point)
 
 class ConnectionLineItem(QGraphicsPathItem):
+    # ... (此部分无变化)
     def __init__(self, source_port_item, dest_port_item):
         super().__init__()
         self.source_port = source_port_item; self.dest_port = dest_port_item

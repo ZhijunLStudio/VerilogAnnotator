@@ -55,7 +55,8 @@ class CircuitDiagram:
             instance_name = instance_path.split('.')[-1]
             comp = Component(instance_name, "", data.get('label'), data.get('box'))
             for port_name, port_data in data.get("ports", {}).items():
-                direction = 'input' if 'in' in port_name.lower() else 'output'
+                direction_hint = port_data.get('label', port_name).lower()
+                direction = 'input' if 'in' in direction_hint else 'output'
                 port = Port(port_name, direction, comp, port_data.get('position'), port_data.get('label'))
                 comp.ports[port_name] = port
             self.components[instance_name] = comp
@@ -126,7 +127,9 @@ class CircuitDiagram:
             
         if not comp: return None
         
-        port_name = self._get_unique_name(direction, comp.ports)
+        port_name_base = base_name if base_name else direction
+        port_name = self._get_unique_name(port_name_base, comp.ports)
+
         port = Port(port_name, direction, comp, position, label)
         if position:
             port.position = [int(p) for p in position]
@@ -180,17 +183,36 @@ class CircuitDiagram:
         if inst1 != inst2: return False
         comp = self.components.get(inst1)
         if not comp or name1 not in comp.ports or name2 not in comp.ports: return False
+        
+        # Ensure port1 is the one we keep, port2 is the one we delete
         port1 = comp.ports[name1]; port2 = comp.ports[name2]
         if port1.direction != port2.direction: return False
+
         net1, net2 = port1.net, port2.net
-        if net2:
-            if port2 in net2.connections: net2.connections.remove(port2)
-            if net1 and net1 != net2:
-                for p in list(net2.connections):
-                    p.net = net1; net1.connections.append(p)
-                if net2.name in self.nets: del self.nets[net2.name]
-            elif not net1:
-                port1.net = net2; net2.connections.append(port1)
+        
+        # MODIFIED: Reworked merge logic for clarity and correctness
+        # Goal: All connections from net2 should be transferred to net1 (or vice versa),
+        # and port1 should be part of the final combined net. port2 will be deleted.
+
+        if net1 and net2 and net1 != net2:
+            # Both ports have different nets. Merge them.
+            # Move all ports from net2 into net1.
+            for p in list(net2.connections):
+                if p != port2: # Don't re-add port2
+                    p.net = net1
+                    net1.connections.append(p)
+            if net2.name in self.nets:
+                del self.nets[net2.name]
+        elif net2 and not net1:
+            # Only port2 has a net. port1 should join it.
+            net2.connections.append(port1)
+            port1.net = net2
+        
+        # Remove port2 from its net if it's still there
+        if net2 and port2 in net2.connections:
+            net2.connections.remove(port2)
+
+        # Finally, delete port2 from the component
         del comp.ports[name2]
         return True
         
@@ -213,9 +235,16 @@ class CircuitDiagram:
         elif not net1 and net2:
             net2.connections.append(port1); port1.net = net2
         elif net1 and net2 and net1 != net2:
+            # MODIFIED: Merge the smaller net into the larger one for stability
+            # This prevents the net name from changing unpredictably based on click order
+            if len(net1.connections) < len(net2.connections):
+                net1, net2 = net2, net1 # Swap so net1 is always the larger net to merge into
+            
             for p in list(net2.connections):
-                p.net = net1; net1.connections.append(p)
-            if net2.name in self.nets: del self.nets[net2.name]
+                p.net = net1
+                net1.connections.append(p)
+            if net2.name in self.nets:
+                del self.nets[net2.name]
         return True
 
     def set_connection_label(self, key1, key2, text):
@@ -235,8 +264,14 @@ class CircuitDiagram:
                 "connection_labels": self.connection_labels
             }
             for inst_name, comp in self.components.items():
-                ports_data = { p.name: {"position": p.position, "label": p.label} for p in comp.ports.values() if p.position is not None }
-                meta_data["visual_metadata"][f"{self.top_level_module}.{inst_name}"] = {"label": comp.label, "box": comp.box, "ports": ports_data}
+                ports_data = { 
+                    p.name: {"position": p.position, "label": p.label} 
+                    for p in comp.ports.values() if p.was_manually_positioned 
+                }
+                # Also save components that have no ports but have a box
+                if ports_data or (comp.box and comp.module_type not in ("InputPort", "OutputPort")):
+                     meta_data["visual_metadata"][f"{self.top_level_module}.{inst_name}"] = {"label": comp.label, "box": comp.box, "ports": ports_data}
+
             with open(self.metadata_path, 'w', encoding='utf-8') as f: json.dump(meta_data, f, indent=2, ensure_ascii=False)
             return True
         except Exception as e:
@@ -244,36 +279,28 @@ class CircuitDiagram:
 
     def _generate_verilog(self):
         module_definitions = defaultdict(lambda: defaultdict(list))
-        
-        # Define modules for all components that have a module type
         for comp in self.components.values():
             if comp.module_type:
                 for port in comp.ports.values():
                     if port.name not in module_definitions[comp.module_type][port.direction]:
                         module_definitions[comp.module_type][port.direction].append(port.name)
-        
         output = []
         for module_type, ports_by_dir in sorted(module_definitions.items()):
             all_ports = sorted(ports_by_dir.get('input', []) + ports_by_dir.get('output', []))
-            # Handle modules with no ports
             if not all_ports:
                 output.append(f"module {module_type} ();")
             else:
                 output.append(f"module {module_type} ({', '.join(all_ports)});")
-            
             decls = []
             if ports_by_dir.get('input'): decls.append(f"    input {', '.join(sorted(ports_by_dir['input']))};")
             if ports_by_dir.get('output'): decls.append(f"    output {', '.join(sorted(ports_by_dir['output']))};")
             if decls: output.append('\n'.join(decls))
             output.append("endmodule\n")
-
         output.append(f"module {self.top_level_module};")
         if self.nets: output.append("\n    wire " + ", ".join(sorted(self.nets.keys())) + ";\n")
-        
         for inst_name, comp in sorted(self.components.items()):
             if comp.module_type:
                 conns = [f".{p.name}({p.net.name if p.net else ''})" for p in sorted(comp.ports.values(), key=lambda x:x.name)]
                 output.append(f"    {comp.module_type} {inst_name} (\n        " + ",\n        ".join(conns) + "\n    );")
-        
         output.append("\nendmodule\n")
         return "\n".join(output)

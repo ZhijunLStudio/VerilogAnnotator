@@ -15,6 +15,7 @@ from .style import DARK_THEME
 from ..graphics_items import ComponentItem, PortItem, ConnectionLineItem, ConnectionLabelItem
 
 class EditableGraphicsView(QGraphicsView):
+    # ... (此部分无变化)
     def __init__(self, scene, main_window):
         super().__init__(scene)
         self.main_window = main_window
@@ -85,8 +86,9 @@ class EditableGraphicsView(QGraphicsView):
 
     def contextMenuEvent(self, event):
         self.main_window.show_context_menu(self.mapToScene(event.pos()), event.globalPos())
-
+        
 class MainWindow(QMainWindow):
+    # ... (__init__, _init_ui, keyPressEvent, etc. are unchanged)
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Verilog Annotator Pro")
@@ -152,7 +154,10 @@ class MainWindow(QMainWindow):
         ops_layout.addWidget(self.btn_merge_ports); ops_layout.addWidget(self.btn_rename_port)
         ops_layout.addWidget(self.btn_split_port); ops_layout.addWidget(self.btn_add_conn_label)
 
-        right_layout.addWidget(prop_group); right_layout.addStretch(1); right_layout.addWidget(ops_group)
+        right_layout.addWidget(prop_group)
+        right_layout.addWidget(ops_group)
+        right_layout.addStretch(1)
+
         main_splitter.addWidget(left_panel); main_splitter.addWidget(self.view); main_splitter.addWidget(right_panel)
         main_splitter.setSizes([250, 1200, 350])
         self.status_bar = QStatusBar(); self.setStatusBar(self.status_bar)
@@ -188,9 +193,19 @@ class MainWindow(QMainWindow):
         if self.image_files: self.file_list.setCurrentRow(0)
         
     def on_file_selected(self, current, previous):
-        if not current or self.file_list.row(current) == self.current_index: return
-        if self.current_index != -1: self.save_current_changes()
-        self.current_index = self.file_list.row(current); self.load_diagram()
+        if previous is not None and self.current_index != -1:
+            self.save_current_changes()
+        
+        if not current:
+            self.current_index = -1
+            return
+
+        new_index = self.file_list.row(current)
+        if new_index == self.current_index:
+            return
+            
+        self.current_index = new_index
+        self.load_diagram()
         
     def navigate_image(self, direction):
         if not self.image_files: return
@@ -199,7 +214,6 @@ class MainWindow(QMainWindow):
         
     def save_current_changes(self):
         if self.diagram and self.diagram.image_path:
-            self.update_model_from_scene()
             if self.diagram.save_files(): self.status_bar.showMessage(f"Saved: {self.diagram.image_path.name}", 3000)
             
     def load_diagram(self):
@@ -225,15 +239,26 @@ class MainWindow(QMainWindow):
     def refresh_scene_from_model(self):
         self.scene.clear(); self.component_items.clear(); self.port_items.clear()
         pixmap = QPixmap(str(self.diagram.image_path))
-        if not pixmap.isNull(): self.scene.addPixmap(pixmap); self.view.setSceneRect(QRectF(pixmap.rect()))
+        
+        # MODIFIED: Define a layout rect that's larger than the image
+        # This gives space for the top-level ports to be visible and selectable.
+        image_rect = QRectF(pixmap.rect()) if not pixmap.isNull() else QRectF(0, 0, 1000, 1000)
+        layout_rect = image_rect.adjusted(-50, -50, 50, 50)
 
-        # 1. Create component items and auto-layout their unpositioned ports
+        if not pixmap.isNull(): 
+            self.scene.addPixmap(pixmap)
+        
         for inst_name, comp_model in self.diagram.components.items():
             comp_item = ComponentItem(comp_model)
             self.scene.addItem(comp_item)
             self.component_items[inst_name] = comp_item
             if comp_model.box:
                 comp_item.setPos(QPointF(*comp_model.box[:2]))
+            else:
+                comp_item.setVisible(False)
+        
+        for inst_name, comp_model in self.diagram.components.items():
+            if comp_model.box and comp_model.module_type not in ("InputPort", "OutputPort"):
                 unpositioned_ports = [p for p in comp_model.ports.values() if not p.was_manually_positioned]
                 if unpositioned_ports:
                     inputs = sorted([p for p in unpositioned_ports if p.direction == 'input'], key=lambda p: p.label)
@@ -247,14 +272,24 @@ class MainWindow(QMainWindow):
                     for i, p_model in enumerate(outputs):
                         y = box_rect.top() + (i + 1) * box_rect.height() / (len(outputs) + 1)
                         p_model.position = [int(box_rect.right()), int(y)]
-            else:
-                 comp_item.setVisible(False)
+        
+        terminals = [p for c in self.diagram.components.values() for p in c.ports.values() if c.module_type in ("InputPort", "OutputPort")]
+        unpositioned_terminals = [p for p in terminals if not p.was_manually_positioned]
+        if unpositioned_terminals:
+            top_inputs = sorted([p for p in unpositioned_terminals if p.direction == 'output'], key=lambda p: p.label)
+            top_outputs = sorted([p for p in unpositioned_terminals if p.direction == 'input'], key=lambda p: p.label)
 
-        # 2. Create all port items now that their positions are calculated
+            for i, p_model in enumerate(top_inputs):
+                y = layout_rect.top() + (i + 1) * layout_rect.height() / (len(top_inputs) + 1)
+                p_model.position = [int(layout_rect.left() + 20), int(y)] # Place inside the left margin
+            for i, p_model in enumerate(top_outputs):
+                y = layout_rect.top() + (i + 1) * layout_rect.height() / (len(top_outputs) + 1)
+                p_model.position = [int(layout_rect.right() - 20), int(y)] # Place inside the right margin
+
         for inst_name, comp_model in self.diagram.components.items():
             comp_item = self.component_items[inst_name]
             for p_name, p_model in comp_model.ports.items():
-                is_terminal = comp_model.module_type in ("Terminal", "InputPort", "OutputPort")
+                is_terminal = comp_model.module_type in ("InputPort", "OutputPort")
                 parent_item = None if is_terminal else comp_item
                 
                 port_item = PortItem(p_model, parent_item=parent_item)
@@ -268,7 +303,6 @@ class MainWindow(QMainWindow):
                     else:
                         port_item.setPos(QPointF(*p_model.position))
         
-        # 3. Create connection lines with stable hub selection
         all_lines = []
         for net in self.diagram.nets.values():
             sorted_connections = sorted(net.connections, key=lambda p: (p.component.instance_name, p.name))
@@ -284,7 +318,6 @@ class MainWindow(QMainWindow):
                         line.update_path()
                         all_lines.append(line)
         
-        # 4. Create connection labels
         for line in all_lines:
             p1_model = line.source_port.port_model; p2_model = line.dest_port.port_model
             key1 = (p1_model.component.instance_name, p1_model.name); key2 = (p2_model.component.instance_name, p2_model.name)
@@ -296,21 +329,13 @@ class MainWindow(QMainWindow):
                 line.label_item = label_item
                 self.scene.addItem(label_item)
                 label_item.update_position()
-
-        # 5. Finalize
+        
+        # MODIFIED: Set the scene rect to the larger layout rect at the very end
+        self.scene.setSceneRect(layout_rect)
         self.set_edit_mode(self.edit_mode, force_update=True)
         self.on_selection_changed()
-
-    def update_model_from_scene(self):
-        if not self.diagram: return
-        for inst_name, comp_item in self.component_items.items():
-            if comp_item.isVisible():
-                pos = comp_item.pos(); rect = comp_item.rect()
-                self.diagram.update_component_box(inst_name, [pos.x(), pos.y(), pos.x() + rect.width(), pos.y() + rect.height()])
-        for (inst_name, port_name), port_item in self.port_items.items():
-            scene_pos = port_item.scenePos()
-            self.diagram.update_port_position(inst_name, port_name, [scene_pos.x(), scene_pos.y()])
     
+    # ... on_selection_changed, set_edit_mode, exit_special_modes etc remain the same
     def on_selection_changed(self):
         selected_items = self.scene.selectedItems()
         selected_ports = [item for item in selected_items if isinstance(item, PortItem)]
@@ -374,21 +399,30 @@ class MainWindow(QMainWindow):
         self.exit_special_modes()
 
     def handle_connection_click(self, clicked_item):
-        if not clicked_item: self.exit_special_modes(); return
+        if not clicked_item:
+            self.exit_special_modes()
+            return
+
         if not self.pending_port_1:
-            self.pending_port_1 = clicked_item; clicked_item.setBrush(QColor("lime"))
+            self.pending_port_1 = clicked_item
+            clicked_item.setBrush(QColor("lime"))
             self.status_bar.showMessage("Connect Mode: Click the second port...")
         else:
-            if self.pending_port_1 == clicked_item: self.exit_special_modes(); return
-            p1_model = self.pending_port_1.port_model; p2_model = clicked_item.port_model
-            key1 = (p1_model.component.instance_name, p1_model.name); key2 = (p2_model.component.instance_name, p2_model.name)
-            if self.diagram.create_connection(key1, key2):
-                line = ConnectionLineItem(self.pending_port_1, clicked_item); self.scene.addItem(line); line.update_path()
-                net_name = p1_model.net.name
-                tooltip1 = f"Label: {p1_model.label}\nName: {p1_model.name}\nNet: {net_name}\nType: {p1_model.direction}"
-                tooltip2 = f"Label: {p2_model.label}\nName: {p2_model.name}\nNet: {net_name}\nType: {p2_model.direction}"
-                self.pending_port_1.setToolTip(tooltip1); clicked_item.setToolTip(tooltip2)
+            if self.pending_port_1 == clicked_item:
+                self.exit_special_modes()
+                return
+
+            p1_model = self.pending_port_1.port_model
+            p2_model = clicked_item.port_model
+            key1 = (p1_model.component.instance_name, p1_model.name)
+            key2 = (p2_model.component.instance_name, p2_model.name)
+            
+            success = self.diagram.create_connection(key1, key2)
             self.exit_special_modes()
+            if success:
+                self.refresh_scene_from_model()
+            else:
+                QMessageBox.warning(self, "Connection Failed", "Could not create connection.")
 
     def handle_merge_click(self, clicked_port):
         if not clicked_port: self.exit_special_modes(); return
@@ -396,20 +430,26 @@ class MainWindow(QMainWindow):
             self.pending_port_for_merge = clicked_port; clicked_port.setBrush(QBrush(QColor("cyan")))
             self.status_bar.showMessage("Merge Mode: Click the second port on the same component.")
         else:
-            p1 = self.pending_port_for_merge; p2 = clicked_port
-            p1_model = p1.port_model; p2_model = p2.port_model
-            if p1 == p2:
+            p1_item = self.pending_port_for_merge; p2_item = clicked_port
+            p1_model = p1_item.port_model; p2_model = p2_item.port_model
+            
+            if p1_item == p2_item:
                 QMessageBox.warning(self, "Merge Failed", "Cannot merge a port with itself."); self.exit_special_modes(); return
             if p1_model.component != p2_model.component or p1_model.component.module_type in ("Terminal", "InputPort", "OutputPort"):
                 QMessageBox.warning(self, "Merge Failed", "Ports must be on the same regular component."); self.exit_special_modes(); return
             if p1_model.direction != p2_model.direction:
                 QMessageBox.warning(self, "Merge Failed", "Ports must have the same direction."); self.exit_special_modes(); return
-            key1 = (p1_model.component.instance_name, p1_model.name); key2 = (p2_model.component.instance_name, p2_model.name)
-            if self.diagram.merge_ports(key1, key2):
+            
+            key1 = (p1_model.component.instance_name, p1_model.name)
+            key2 = (p2_model.component.instance_name, p2_model.name)
+            
+            success = self.diagram.merge_ports(key1, key2)
+            self.exit_special_modes()
+            if success:
                 self.status_bar.showMessage(f"Successfully merged {p1_model.label} and {p2_model.label}.", 3000)
-                self.exit_special_modes(); self.refresh_scene_from_model()
+                self.refresh_scene_from_model()
             else:
-                 QMessageBox.warning(self, "Merge Failed", "An unknown error occurred."); self.exit_special_modes()
+                 QMessageBox.warning(self, "Merge Failed", "An unknown error occurred.")
             
     def rename_selected_port(self):
         selected = [item for item in self.scene.selectedItems() if isinstance(item, PortItem)]
@@ -465,24 +505,27 @@ class MainWindow(QMainWindow):
             return
 
         txt = (f"<b>Instance:</b> {comp_model.instance_name}<br>"f"<b>Type:</b> {comp_model.module_type}<br>")
-        is_terminal = comp_model.module_type in ("Terminal", "InputPort", "OutputPort")
+        is_terminal = comp_model.module_type in ("InputPort", "OutputPort")
         if is_terminal:
             if comp_model.ports:
                 p = list(comp_model.ports.values())[0]
-                pos_str = f"[{p.position[0]},{p.position[1]}]" if p.position else "<font color='orange'>auto</font>"
+                pos_status = "Manual" if p.was_manually_positioned else "Auto"
+                pos_str = f"[{int(p.position[0])},{int(p.position[1])}]" if p.position else "<font color='orange'>N/A</font>"
                 net_str = p.net.name if p.net else "<font color='grey'>N/A</font>"
                 txt = (f"<b>Top-Level Port (Terminal)</b><br>"
                        f"- <b>Label:</b> {p.label}<br>"
                        f"- <b>Name:</b> {p.name}<br>"
                        f"- <b>Direction:</b> {p.direction}<br>"
                        f"- <b>On Net:</b> <i>{net_str}</i><br>"
-                       f"- <b>Position:</b> {pos_str}<br>")
+                       f"- <b>Position:</b> {pos_str} ({pos_status})<br>")
         else:
             txt += f"<b>Ports:</b> ({len(comp_model.ports)})<br>"
             for p_name, p in sorted(comp_model.ports.items(), key=lambda x: x[1].label):
-                pos_str = f"[{p.position[0]},{p.position[1]}]" if p.position else "<font color='orange'>auto</font>"
+                pos_status = "Manual" if p.was_manually_positioned else "Auto"
+                pos_color = "white" if p.was_manually_positioned else "cyan"
+                pos_str = f"[{int(p.position[0])},{int(p.position[1])}]" if p.position else "<font color='orange'>N/A</font>"
                 net_str = p.net.name if p.net else "<font color='grey'>N/A</font>"
-                txt += f"- <b>{p.label}</b> ({p.name}, {p.direction}) on <i>{net_str}</i> @ {pos_str}<br>"
+                txt += f"- <b>{p.label}</b> ({p.direction}) on <i>{net_str}</i> @ <font color='{pos_color}'>{pos_str} ({pos_status})</font><br>"
         self.info_label.setText(txt)
         
     def show_context_menu(self, scene_pos, global_pos):
