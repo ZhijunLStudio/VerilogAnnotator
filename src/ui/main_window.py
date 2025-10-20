@@ -15,7 +15,7 @@ from .style import DARK_THEME
 from ..graphics_items import ComponentItem, PortItem, ConnectionLineItem, ConnectionLabelItem
 
 class EditableGraphicsView(QGraphicsView):
-    # ... (此部分无变化)
+    # This class remains unchanged
     def __init__(self, scene, main_window):
         super().__init__(scene)
         self.main_window = main_window
@@ -88,7 +88,6 @@ class EditableGraphicsView(QGraphicsView):
         self.main_window.show_context_menu(self.mapToScene(event.pos()), event.globalPos())
         
 class MainWindow(QMainWindow):
-    # ... (__init__, _init_ui, keyPressEvent, etc. are unchanged)
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Verilog Annotator Pro")
@@ -240,14 +239,13 @@ class MainWindow(QMainWindow):
         self.scene.clear(); self.component_items.clear(); self.port_items.clear()
         pixmap = QPixmap(str(self.diagram.image_path))
         
-        # MODIFIED: Define a layout rect that's larger than the image
-        # This gives space for the top-level ports to be visible and selectable.
         image_rect = QRectF(pixmap.rect()) if not pixmap.isNull() else QRectF(0, 0, 1000, 1000)
         layout_rect = image_rect.adjusted(-50, -50, 50, 50)
 
         if not pixmap.isNull(): 
             self.scene.addPixmap(pixmap)
         
+        # Steps 1-3 remain the same: create components, calculate port positions, create port items
         for inst_name, comp_model in self.diagram.components.items():
             comp_item = ComponentItem(comp_model)
             self.scene.addItem(comp_item)
@@ -263,9 +261,7 @@ class MainWindow(QMainWindow):
                 if unpositioned_ports:
                     inputs = sorted([p for p in unpositioned_ports if p.direction == 'input'], key=lambda p: p.label)
                     outputs = sorted([p for p in unpositioned_ports if p.direction == 'output'], key=lambda p: p.label)
-                    
                     box_rect = QRectF(comp_model.box[0], comp_model.box[1], comp_model.box[2] - comp_model.box[0], comp_model.box[3] - comp_model.box[1])
-
                     for i, p_model in enumerate(inputs):
                         y = box_rect.top() + (i + 1) * box_rect.height() / (len(inputs) + 1)
                         p_model.position = [int(box_rect.left()), int(y)]
@@ -278,49 +274,71 @@ class MainWindow(QMainWindow):
         if unpositioned_terminals:
             top_inputs = sorted([p for p in unpositioned_terminals if p.direction == 'output'], key=lambda p: p.label)
             top_outputs = sorted([p for p in unpositioned_terminals if p.direction == 'input'], key=lambda p: p.label)
-
             for i, p_model in enumerate(top_inputs):
                 y = layout_rect.top() + (i + 1) * layout_rect.height() / (len(top_inputs) + 1)
-                p_model.position = [int(layout_rect.left() + 20), int(y)] # Place inside the left margin
+                p_model.position = [int(layout_rect.left() + 20), int(y)]
             for i, p_model in enumerate(top_outputs):
                 y = layout_rect.top() + (i + 1) * layout_rect.height() / (len(top_outputs) + 1)
-                p_model.position = [int(layout_rect.right() - 20), int(y)] # Place inside the right margin
+                p_model.position = [int(layout_rect.right() - 20), int(y)]
 
         for inst_name, comp_model in self.diagram.components.items():
             comp_item = self.component_items[inst_name]
             for p_name, p_model in comp_model.ports.items():
                 is_terminal = comp_model.module_type in ("InputPort", "OutputPort")
                 parent_item = None if is_terminal else comp_item
-                
                 port_item = PortItem(p_model, parent_item=parent_item)
                 if not parent_item: self.scene.addItem(port_item)
-
                 self.port_items[(inst_name, p_name)] = port_item
-                
                 if p_model.position:
                     if parent_item:
                         port_item.setPos(parent_item.mapFromScene(QPointF(*p_model.position)))
                     else:
                         port_item.setPos(QPointF(*p_model.position))
         
+        # MODIFIED: Reworked connection drawing logic
         all_lines = []
         for net in self.diagram.nets.values():
-            sorted_connections = sorted(net.connections, key=lambda p: (p.component.instance_name, p.name))
-            if len(sorted_connections) > 1:
-                hub_model = sorted_connections[0]
-                hub_key = (hub_model.component.instance_name, hub_model.name)
-                for i in range(1, len(sorted_connections)):
-                    spoke_model = sorted_connections[i]
-                    spoke_key = (spoke_model.component.instance_name, spoke_model.name)
-                    if hub_key in self.port_items and spoke_key in self.port_items:
-                        line = ConnectionLineItem(self.port_items[hub_key], self.port_items[spoke_key])
-                        self.scene.addItem(line)
-                        line.update_path()
-                        all_lines.append(line)
-        
+            ports_in_net = [self.port_items.get((p.component.instance_name, p.name)) for p in net.connections]
+            ports_in_net = [p for p in ports_in_net if p is not None]
+
+            if len(ports_in_net) < 2:
+                continue
+
+            # --- Start of Minimum Spanning Tree (Prim's Algorithm) Logic ---
+            num_ports = len(ports_in_net)
+            in_tree = [False] * num_ports
+            distance = [float('inf')] * num_ports
+            parent_edge = [-1] * num_ports
+            distance[0] = 0
+            
+            for _ in range(num_ports):
+                min_dist, u = float('inf'), -1
+                for i in range(num_ports):
+                    if not in_tree[i] and distance[i] < min_dist:
+                        min_dist, u = distance[i], i
+                if u == -1: break
+                in_tree[u] = True
+                
+                port_u, pos_u = ports_in_net[u], ports_in_net[u].scenePos()
+                for v in range(num_ports):
+                    if not in_tree[v]:
+                        port_v, pos_v = ports_in_net[v], ports_in_net[v].scenePos()
+                        dist_uv = math.hypot(pos_u.x() - pos_v.x(), pos_u.y() - pos_v.y())
+                        if dist_uv < distance[v]:
+                            distance[v], parent_edge[v] = dist_uv, u
+                            
+            for i in range(1, num_ports):
+                parent_idx = parent_edge[i]
+                if parent_idx != -1:
+                    line = ConnectionLineItem(ports_in_net[parent_idx], ports_in_net[i])
+                    self.scene.addItem(line)
+                    line.update_path()
+                    all_lines.append(line)
+            # --- End of MST Logic ---
+
         for line in all_lines:
-            p1_model = line.source_port.port_model; p2_model = line.dest_port.port_model
-            key1 = (p1_model.component.instance_name, p1_model.name); key2 = (p2_model.component.instance_name, p2_model.name)
+            p1_model, p2_model = line.source_port.port_model, line.dest_port.port_model
+            key1, key2 = (p1_model.component.instance_name, p1_model.name), (p2_model.component.instance_name, p2_model.name)
             key_tuple = tuple(sorted((f"{key1[0]}.{key1[1]}", f"{key2[0]}.{key2[1]}")))
             label_key = "--".join(key_tuple)
             if label_key in self.diagram.connection_labels:
@@ -329,13 +347,13 @@ class MainWindow(QMainWindow):
                 line.label_item = label_item
                 self.scene.addItem(label_item)
                 label_item.update_position()
-        
-        # MODIFIED: Set the scene rect to the larger layout rect at the very end
+
         self.scene.setSceneRect(layout_rect)
         self.set_edit_mode(self.edit_mode, force_update=True)
         self.on_selection_changed()
     
-    # ... on_selection_changed, set_edit_mode, exit_special_modes etc remain the same
+    # All other methods from handle_connection_click onwards are unchanged from the previous fix.
+    # I am including them for completeness.
     def on_selection_changed(self):
         selected_items = self.scene.selectedItems()
         selected_ports = [item for item in selected_items if isinstance(item, PortItem)]
