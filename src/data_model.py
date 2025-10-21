@@ -35,121 +35,112 @@ class Net:
         self.name = name
         self.connections = [] 
 
+# --- NEW: Data model for a group ---
+class Group:
+    def __init__(self, name, label, points):
+        self.name = name
+        self.label = label
+        self.points = points # List of [x, y] coordinates
+
 class CircuitDiagram:
     def __init__(self):
         self.components = {}
         self.nets = {}
+        self.groups = {} # --- NEW: Dictionary to store groups
         self.image_path = None
-        self.verilog_path = None
-        self.metadata_path = None
         self.top_level_module = "top_level_system"
         self.connection_labels = {}
+        self.module_definitions = defaultdict(lambda: {'ports': {}})
 
-    def load_files(self, image_path, verilog_path, metadata_path):
-        self.image_path, self.verilog_path, self.metadata_path = image_path, verilog_path, metadata_path
+    def load_from_raw_json(self, image_path, raw_json_path):
+        self.image_path = image_path
         self.components.clear(); self.nets.clear(); self.connection_labels.clear()
-        
+        self.module_definitions.clear(); self.groups.clear()
+
         try:
-            with open(metadata_path, 'r', encoding='utf-8') as f: meta = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError): meta = {}
+            with open(raw_json_path, 'r', encoding='utf-8') as f:
+                raw_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"[ERROR] Could not load or parse raw JSON file {raw_json_path}: {e}")
+            return False
 
-        self.connection_labels = meta.get("connection_labels", {})
+        defined_components = set(raw_data.keys())
+        all_entities = set(defined_components)
+        directed_connections = set()
 
-        for instance_path, data in meta.get("visual_metadata", {}).items():
-            instance_name = instance_path.split('.')[-1]
-            label = data.get("label")
-            comp = Component(instance_name, None, label, data.get('box'))
+        for source_name, data in raw_data.items():
+            connections = data.get('connections', {})
+            for conn in connections.get('input', []):
+                target_name = conn.get('name')
+                if target_name:
+                    directed_connections.add((target_name, source_name))
+                    all_entities.add(target_name)
+            for conn in connections.get('output', []):
+                target_name = conn.get('name')
+                if target_name:
+                    directed_connections.add((source_name, target_name))
+                    all_entities.add(target_name)
+            for conn in connections.get('inout', []):
+                target_name = conn.get('name')
+                if target_name:
+                    directed_connections.add((source_name, target_name))
+                    directed_connections.add((target_name, source_name))
+                    all_entities.add(target_name)
+        
+        terminals = all_entities - defined_components
+        entity_ports = {name: defaultdict(list) for name in all_entities}
+        
+        for source, target in sorted(list(directed_connections)):
+            sane_source = sanitize_for_verilog(source)
+            sane_target = sanitize_for_verilog(target)
             
-            # --- START MODIFICATION (Robustness Enhancement) ---
-            # 即使 module_type 未定义，也尝试根据标签或实例名猜测是否为终端
-            is_input_terminal_heuristic = comp.module_type == "InputPort" or "input" in str(label).lower() or "port" in instance_name.lower() and "in" in str(label).lower()
-            is_output_terminal_heuristic = comp.module_type == "OutputPort" or "output" in str(label).lower() or "port" in instance_name.lower() and "out" in str(label).lower()
-            # --- END MODIFICATION ---
+            out_port_idx = len(entity_ports[source]['output'])
+            in_port_idx = len(entity_ports[target]['input'])
+            
+            net_name = self._get_unique_name(f"net_{sane_source}_to_{sane_target}", self.nets)
+            net = Net(net_name)
+            self.nets[net_name] = net
 
-            for port_name, port_data in data.get("ports", {}).items():
-                sane_port_name = sanitize_for_verilog(port_name)
-                
-                # --- START MODIFICATION (Robustness Enhancement) ---
-                # 强制修正 Input/OutputPort 的内部端口名，以修复不规范的旧 meta 文件
-                final_port_name = sane_port_name
-                final_direction = 'output' if 'out' in sane_port_name.lower() else 'input'
+            source_port_name = f"out_{out_port_idx}"
+            target_port_name = f"in_{in_port_idx}"
+            
+            entity_ports[source]['output'].append({'name': source_port_name, 'net': net})
+            entity_ports[target]['input'].append({'name': target_port_name, 'net': net})
 
-                if is_input_terminal_heuristic and not is_output_terminal_heuristic:
-                    final_port_name = 'out_0'
-                    final_direction = 'output'
-                    comp.module_type = "InputPort" # 顺便修正 module_type
-                elif is_output_terminal_heuristic and not is_input_terminal_heuristic:
-                    final_port_name = 'in_0'
-                    final_direction = 'input'
-                    comp.module_type = "OutputPort" # 顺便修正 module_type
-                # --- END MODIFICATION ---
-                
-                port = Port(final_port_name, final_direction, comp, port_data.get('position'), port_data.get('label', port_name))
-                comp.ports[final_port_name] = port
+        for entity_name in sorted(list(all_entities)):
+            is_terminal = entity_name in terminals
+            is_input_terminal = is_terminal and entity_ports[entity_name]['output'] and not entity_ports[entity_name]['input']
+            is_output_terminal = is_terminal and entity_ports[entity_name]['input'] and not entity_ports[entity_name]['output']
+            
+            sane_name = sanitize_for_verilog(entity_name)
+            module_type, instance_name = "", ""
+
+            if is_input_terminal:
+                module_type, instance_name = "InputPort", f"{sane_name}_port"
+            elif is_output_terminal:
+                module_type, instance_name = "OutputPort", f"{sane_name}_port"
+            else:
+                module_type, instance_name = sane_name, f"{sane_name}_inst"
+
+            comp_box = raw_data.get(entity_name, {}).get("component_box")
+            comp = Component(instance_name, module_type, entity_name, comp_box)
             self.components[instance_name] = comp
+
+            for port_info in entity_ports[entity_name]['input']:
+                p = Port(port_info['name'], 'input', comp, label=port_info['name'])
+                p.net = port_info['net']; p.net.connections.append(p)
+                comp.ports[p.name] = p
+                self.module_definitions[module_type]['ports'][p.name] = 'input'
+
+            for port_info in entity_ports[entity_name]['output']:
+                p = Port(port_info['name'], 'output', comp, label=port_info['name'])
+                p.net = port_info['net']; p.net.connections.append(p)
+                comp.ports[p.name] = p
+                self.module_definitions[module_type]['ports'][p.name] = 'output'
         
-        try:
-            with open(verilog_path, 'r', encoding='utf-8') as f: verilog_content = f.read()
-        except FileNotFoundError: return True
+        self.module_definitions['InputPort']['ports']['out_0'] = 'output'
+        self.module_definitions['OutputPort']['ports']['in_0'] = 'input'
 
-        port_directions = defaultdict(dict)
-        module_pattern = re.compile(r"module\s+([\w\\]+)\s*(#\s*\(.*?\))?\s*(\(.*?\))?\s*;", re.DOTALL)
-        declaration_pattern = re.compile(r"\s*(input|output|inout)\s+([^;]+);", re.DOTALL)
-        endmodule_pattern = re.compile(r"\bendmodule\b")
-
-        last_pos = 0
-        while True:
-            match = re.search(r"\bmodule\s+([\w\\]+)", verilog_content[last_pos:])
-            if not match: break
-            
-            module_name = match.group(1)
-            start_pos = last_pos + match.end()
-            
-            end_match = endmodule_pattern.search(verilog_content, start_pos)
-            if not end_match: break
-            
-            module_body = verilog_content[start_pos:end_match.start()]
-            last_pos = end_match.end()
-
-            for dir_match in declaration_pattern.finditer(module_body):
-                direction, port_list_str = dir_match.groups()
-                port_list_str = re.sub(r'\[.*?\]', '', port_list_str)
-                for port_name in re.split(r',\s*', port_list_str.strip()):
-                    if port_name:
-                        port_directions[module_name][port_name.strip()] = direction
-
-        instance_pattern = re.compile(r"([\w\\]+)\s+([\w\\]+)\s*\((.*?)\);", re.DOTALL)
-        port_conn_pattern = re.compile(r"\s*\.([\w\\]+)\s*\(([\w\d_\[\]\s:]*?)\)")
-        top_module_match = re.search(fr"module\s+{self.top_level_module}\s*\(.*?\);(.*?)endmodule", verilog_content, re.DOTALL)
-        search_area = top_module_match.group(1) if top_module_match else verilog_content
-        
-        for match in instance_pattern.finditer(search_area):
-            module_type, instance_name, connections_str = [s.strip() for s in match.groups()]
-            if instance_name in self.components:
-                comp = self.components[instance_name]
-                comp.module_type = module_type
-                
-                #
-                # Verilog parsing should not override the corrected module types for terminals
-                if comp.module_type not in ("InputPort", "OutputPort"):
-                    comp.module_type = module_type
-                
-                for port_name, port in comp.ports.items():
-                    if port_name in port_directions[module_type]:
-                        port.direction = port_directions[module_type][port_name]
-                
-                for port_match in port_conn_pattern.finditer(connections_str):
-                    port_name, net_name = [s.strip() for s in port_match.groups()]
-                    if not net_name: continue
-                    
-                    if port_name in comp.ports:
-                        port = comp.ports[port_name]
-                        if net_name not in self.nets:
-                            self.nets[net_name] = Net(net_name)
-                        net = self.nets[net_name]
-                        if port not in net.connections:
-                            net.connections.append(port)
-                        port.net = net
         return True
 
     def _get_unique_name(self, base, existing_keys):
@@ -160,11 +151,34 @@ class CircuitDiagram:
             i += 1; name = f"{sanitized_base}_{i}"
         return name
 
+    def add_group(self, label, points):
+        name = self._get_unique_name(label, self.groups)
+        group = Group(name, label, points)
+        self.groups[name] = group
+        return group
+
+    def delete_group(self, group_name):
+        if group_name in self.groups:
+            del self.groups[group_name]
+
+    def rename_group_label(self, group_name, new_label):
+        if group_name in self.groups:
+            self.groups[group_name].label = new_label
+            return True
+        return False
+
+    def update_group_polygon(self, group_name, new_points):
+        if group_name in self.groups:
+            self.groups[group_name].points = new_points
+            return True
+        return False
+
     def add_component(self, instance_name, module_type, label, box):
         sane_instance_name = self._get_unique_name(instance_name, self.components)
         sane_module_type = sanitize_for_verilog(module_type)
         comp = Component(sane_instance_name, sane_module_type, label, [int(c) for c in box] if box else None)
         self.components[sane_instance_name] = comp
+        _ = self.module_definitions[sane_module_type]
         return comp
 
     def add_port(self, instance_name, direction, position=None, label=None):
@@ -177,55 +191,75 @@ class CircuitDiagram:
         else:
             inst_name_base = sane_label + "_port"
             instance_name = self._get_unique_name(inst_name_base, self.components)
-            # Note: The direction is counter-intuitive. An 'input' terminal is a source from the top-level view,
-            # so its module type is 'InputPort' and its port direction is 'output'.
             module_type = "InputPort" if direction == "input" else "OutputPort"
             target_comp = self.add_component(instance_name, module_type, label, None)
         
         if not target_comp: return None
 
-        # --- START MODIFICATION ---
-        # Core Fix: Ensure InputPort/OutputPort have fixed port names
-        port_name = ""
-        final_direction = direction
-        
+        port_name, final_direction = "", direction
         if target_comp.module_type == "InputPort":
-            final_direction = 'output'
-            port_name = 'out_0'  # Fixed port name
+            final_direction, port_name = 'output', 'out_0'
         elif target_comp.module_type == "OutputPort":
-            final_direction = 'input'
-            port_name = 'in_0'   # Fixed port name
+            final_direction, port_name = 'input', 'in_0'
         else:
-            # For regular components, maintain the original logic
             port_name = self._get_unique_name(sane_label, target_comp.ports)
         
-        # If the port name already exists (for Input/OutputPort, this means the component already has its port),
-        # we should not add a duplicate.
         if port_name in target_comp.ports:
-            print(f"[Warning] Port '{port_name}' already exists on '{target_comp.instance_name}'. Cannot add new port.")
             return None
-        # --- END MODIFICATION ---
 
         port = Port(port_name, final_direction, target_comp, position, label)
         if position:
             port.position = [int(p) for p in position]
             port.was_manually_positioned = True
         target_comp.ports[port_name] = port
+        
+        module_type = target_comp.module_type
+        if port_name not in self.module_definitions[module_type]['ports']:
+            self.module_definitions[module_type]['ports'][port_name] = final_direction
         return port
     
-    def update_component_box(self, instance_name, new_box):
-        if instance_name in self.components: self.components[instance_name].box = [int(c) for c in new_box]
-    def update_port_position(self, instance_name, port_name, new_pos):
-        comp = self.components.get(instance_name)
-        if comp and port_name in comp.ports:
-            port = comp.ports[port_name]
-            port.position = [int(p) for p in new_pos]
-            port.was_manually_positioned = True
-    def delete_component(self, instance_name):
-        if instance_name not in self.components: return
-        comp_to_delete = self.components[instance_name]
-        for port in list(comp_to_delete.ports.values()): self.delete_port(instance_name, port.name)
-        del self.components[instance_name]
+    def save_to_unified_json(self, output_path):
+        if not output_path: return False
+        
+        modules_block = {name: {"ports": [{"name": pn, "direction": d} for pn, d in sorted(defn['ports'].items())]} for name, defn in sorted(self.module_definitions.items())}
+        
+        instances_block = {}
+        for inst_name, comp in sorted(self.components.items()):
+            ports_metadata = { p.name: {"position": p.position} for p in comp.ports.values() if p.was_manually_positioned }
+            instances_block[inst_name] = {
+                "module_type": comp.module_type,
+                "visual_metadata": {"label": comp.label, "box": comp.box, "ports": ports_metadata}
+            }
+
+        nets_block = {net_name: {"connections": [{"instance": p.component.instance_name, "port": p.name} for p in net.connections]} for net_name, net in sorted(self.nets.items())}
+
+        # --- NEW: Serialize groups ---
+        groups_block = {name: {"label": group.label, "points": group.points} for name, group in sorted(self.groups.items())}
+
+        unified_json = {
+            "diagram_info": {
+                "image_source": self.image_path.name if self.image_path else "N/A",
+                "schema_version": "1.2-UnifiedWithGroups"
+            },
+            "modules": modules_block,
+            "design": {
+                "top_module_name": self.top_level_module,
+                "instances": instances_block,
+                "nets": nets_block,
+                "groups": groups_block, # --- NEW ---
+                "connection_labels": self.connection_labels
+            }
+        }
+
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(unified_json, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception as e:
+            print(f"[ERROR] Failed to save unified JSON: {e}")
+            return False
+
+    # ... (other methods like delete_port, rename_port_label, etc. remain the same) ...
     def delete_port(self, instance_name, port_name):
         comp = self.components.get(instance_name)
         if not comp or port_name not in comp.ports: return
@@ -242,19 +276,26 @@ class CircuitDiagram:
         if not (comp and port_name in comp.ports): return False
         port = comp.ports[port_name]
         port.label = new_label
-
-        # --- START MODIFICATION ---
-        # Core Fix: When renaming a terminal, only change instance name and label, not the internal port name
         if comp.module_type in ("InputPort", "OutputPort"):
             comp.label = new_label
-            # Only update the component instance name; port.name (in_0/out_0) remains unchanged
             new_inst_name = self._get_unique_name(new_label + "_port", {k:v for k,v in self.components.items() if k != instance_name})
             if new_inst_name != instance_name:
                 self.components[new_inst_name] = self.components.pop(instance_name)
                 comp.instance_name = new_inst_name
-        # --- END MODIFICATION ---
         return True
-    
+    def update_component_box(self, instance_name, new_box):
+        if instance_name in self.components: self.components[instance_name].box = [int(c) for c in new_box]
+    def update_port_position(self, instance_name, port_name, new_pos):
+        comp = self.components.get(instance_name)
+        if comp and port_name in comp.ports:
+            port = comp.ports[port_name]
+            port.position = [int(p) for p in new_pos]
+            port.was_manually_positioned = True
+    def delete_component(self, instance_name):
+        if instance_name not in self.components: return
+        comp_to_delete = self.components[instance_name]
+        for port in list(comp_to_delete.ports.values()): self.delete_port(instance_name, port.name)
+        del self.components[instance_name]
     def merge_ports(self, key1, key2):
         inst1, name1 = key1; inst2, name2 = key2
         if inst1 != inst2: return False
@@ -276,9 +317,7 @@ class CircuitDiagram:
         inst1, name1 = key1; inst2, name2 = key2
         comp1 = self.components.get(inst1); comp2 = self.components.get(inst2)
         if not comp1 or not comp2 or name1 not in comp1.ports or name2 not in comp2.ports: return False
-        
         port1 = comp1.ports[name1]; port2 = comp2.ports[name2]
-
         net1, net2 = port1.net, port2.net
         if net1 and net1 == net2: return True
         if not net1 and not net2:
@@ -299,67 +338,6 @@ class CircuitDiagram:
         label_key = "--".join(key_tuple)
         if text: self.connection_labels[label_key] = {"text": text}
         elif label_key in self.connection_labels: del self.connection_labels[label_key]
-
     def split_port(self, instance_name, port_name):
-        """
-        Placeholder method for the split port functionality.
-        Currently, it only prints a message and returns failure.
-        A full implementation would require complex logic to create a new port
-        and handle the net connections of the original port.
-        """
         print(f"Functionality not implemented: Split port {instance_name}.{port_name}")
-        # Add specific implementation logic here in the future
         return False
-
-    def save_files(self):
-        if not self.metadata_path or not self.verilog_path: return False
-        try:
-            with open(self.verilog_path, 'w', encoding='utf-8') as f: f.write(self._generate_verilog())
-            meta_data = {
-                "diagram_info": {"image_source": self.image_path.name, "verilog_source": self.verilog_path.name}, 
-                "visual_metadata": {},
-                "connection_labels": self.connection_labels
-            }
-            for inst_name, comp in self.components.items():
-                ports_data = { p.name: {"position": p.position, "label": p.label} for p in comp.ports.values() if p.was_manually_positioned }
-                if ports_data or comp.box:
-                     meta_data["visual_metadata"][f"{self.top_level_module}.{inst_name}"] = {"label": comp.label, "box": comp.box, "ports": ports_data}
-            with open(self.metadata_path, 'w', encoding='utf-8') as f: json.dump(meta_data, f, indent=2, ensure_ascii=False)
-            return True
-        except Exception as e:
-            print(f"[ERROR] Failed to save files: {e}"); return False
-
-    def _generate_verilog(self):
-        output = []
-        module_definitions = defaultdict(lambda: defaultdict(list))
-        
-        for comp in self.components.values():
-            if comp.module_type:
-                for port in comp.ports.values():
-                    port_name = sanitize_for_verilog(port.name)
-                    if port_name not in module_definitions[comp.module_type][port.direction]:
-                        module_definitions[comp.module_type][port.direction].append(port_name)
-
-        for module_type, ports_by_dir in sorted(module_definitions.items()):
-            all_ports = sorted(ports_by_dir.get('input', []) + ports_by_dir.get('output', []))
-            port_list_str = f"({', '.join(all_ports)})" if all_ports else ""
-            output.append(f"module {module_type} {port_list_str};")
-            
-            if ports_by_dir.get('input'):
-                output.append(f"    input {', '.join(sorted(ports_by_dir['input']))};")
-            if ports_by_dir.get('output'):
-                output.append(f"    output {', '.join(sorted(ports_by_dir['output']))};")
-            output.append("endmodule\n")
-
-        output.append(f"module {self.top_level_module};")
-        if self.nets: output.append("\n    wire " + ", ".join(sorted(self.nets.keys())) + ";\n")
-        
-        for inst_name, comp in sorted(self.components.items()):
-            if not comp.module_type: continue
-
-            conns = [f".{p.name}({p.net.name if p.net else ''})" for p in sorted(comp.ports.values(), key=lambda x:x.name)]
-            if conns:
-                output.append(f"    {comp.module_type} {inst_name} (\n        " + ",\n        ".join(conns) + "\n    );")
-        
-        output.append("\nendmodule\n")
-        return "\n".join(output)
