@@ -3,8 +3,13 @@ from PyQt6.QtGui import QPen, QBrush, QColor, QPainterPath
 from PyQt6.QtCore import Qt, QPointF
 
 class PortItem(QGraphicsEllipseItem):
-    def __init__(self, port_model, entity_model, parent_item):
-        super().__init__(-5, -5, 10, 10, parent=parent_item)
+    def __init__(self, port_model, entity_model, parent_item=None):
+        # If it's a terminal (no parent_item), the PortItem is the main body.
+        # Otherwise, it's a small dot on a component.
+        is_terminal = parent_item is None
+        radius = 8 if is_terminal else 5
+        super().__init__(-radius, -radius, radius*2, radius*2, parent=parent_item)
+        
         self.port_model = port_model
         self.entity_model = entity_model
         self.connection_lines = []
@@ -15,40 +20,67 @@ class PortItem(QGraphicsEllipseItem):
         self.setZValue(2)
         
         color_map = {'input': QColor("#D32F2F"), 'output': QColor("#388E3C"), 'inout': QColor("#F57C00")}
-        self.setBrush(QBrush(color_map.get(port_model.direction, "#AAAAAA")))
-        self.setPen(QPen(QColor("black"), 1))
+        brush_color = color_map.get(port_model.direction, "#AAAAAA")
+        if is_terminal:
+            # Terminals are larger and have a border
+            self.setBrush(QBrush(brush_color.lighter(120)))
+            self.setPen(QPen(brush_color.darker(150), 2))
+        else:
+            self.setBrush(QBrush(brush_color))
+            self.setPen(QPen(QColor("black"), 1))
         
-        display_text = entity_model.label if entity_model.box is None else port_model.label
+        # Display entity label for terminals, port label for components
+        display_text = entity_model.label
         self.label = QGraphicsTextItem(display_text, parent=self)
         self.label.setDefaultTextColor(QColor("#00008B"))
-        font = self.label.font(); font.setPointSize(8); self.label.setFont(font)
-        self.label.setPos(10, -8)
+        font = self.label.font(); font.setPointSize(10 if is_terminal else 8); self.label.setFont(font)
+        # Center the label if it's a terminal
+        if is_terminal:
+            rect = self.label.boundingRect()
+            self.label.setPos(-rect.width()/2, -rect.height()/2)
+        else:
+            self.label.setPos(10, -8)
+        
         self.update_tooltip()
 
     def update_tooltip(self):
-        self.setToolTip(f"Label: {self.port_model.label}\nID: {self.port_model.id}\nDirection: {self.port_model.direction}")
+        self.setToolTip(f"Label: {self.entity_model.label}\nPort: {self.port_model.label}\nID: {self.entity_model.id}")
 
     def itemChange(self, change, value):
         result = super().itemChange(change, value)
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged and self.scene():
-            new_pos = self.pos()
             diagram = self.scene().parent().diagram
-            diagram.update_port_position(self.entity_model.id, self.port_model.id, [new_pos.x(), new_pos.y()])
+            is_terminal = self.parentItem() is None
+
+            if is_terminal:
+                # If this is a terminal, moving it updates the ENTITY's position
+                new_pos = self.pos()
+                diagram.update_entity_position(self.entity_model.id, [new_pos.x(), new_pos.y()])
+            else:
+                # If this is a port on a component, moving it updates the PORT's relative position
+                new_pos = self.pos()
+                diagram.update_port_position(self.entity_model.id, self.port_model.id, [new_pos.x(), new_pos.y()])
+
             for line in self.connection_lines: line.update_path()
         return result
 
-    def hoverEnterEvent(self, event): self.setPen(QPen(QColor("gold"), 2)); super().hoverEnterEvent(event)
-    def hoverLeaveEvent(self, event): self.setPen(QPen(QColor("black"), 1)); super().hoverLeaveEvent(event)
+    def hoverEnterEvent(self, event): self.setPen(QPen(QColor("gold"), 3)); super().hoverEnterEvent(event)
+    def hoverLeaveEvent(self, event):
+        is_terminal = self.parentItem() is None
+        if is_terminal:
+            color_map = {'input': QColor("#D32F2F"), 'output': QColor("#388E3C"), 'inout': QColor("#F57C00")}
+            border_color = color_map.get(self.port_model.direction, "#AAAAAA").darker(150)
+            self.setPen(QPen(border_color, 2))
+        else:
+            self.setPen(QPen(QColor("black"), 1))
+        super().hoverLeaveEvent(event)
         
 class EntityItem(QGraphicsRectItem):
+    # This class is now ONLY for components with a box.
     def __init__(self, entity_model):
         self.entity_model = entity_model
-        if entity_model.box:
-            super().__init__(0, 0, entity_model.box[0], entity_model.box[1])
-            self.setPen(QPen(QColor(0, 0, 255, 200), 2)); self.setBrush(QBrush(QColor(0, 0, 255, 30)))
-        else: # Terminals
-            super().__init__(-5, -5, 10, 10)
-            self.setPen(QPen(Qt.GlobalColor.transparent)); self.setBrush(QBrush(Qt.GlobalColor.transparent))
+        super().__init__(0, 0, entity_model.box[0], entity_model.box[1])
+        self.setPen(QPen(QColor(0, 0, 255, 200), 2)); self.setBrush(QBrush(QColor(0, 0, 255, 30)))
 
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)

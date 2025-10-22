@@ -52,10 +52,9 @@ class EditableGraphicsView(QGraphicsView):
     def get_item_at(self, pos, item_type):
         item = self.itemAt(pos)
         if isinstance(item, item_type): return item
-        if item_type == EntityItem: 
-            port = self.get_item_at(pos, PortItem)
-            if port and port.parentItem() and isinstance(port.parentItem(), EntityItem) and port.parentItem().entity_model.box is None:
-                return port.parentItem()
+        # If looking for an EntityItem, and we hit a PortItem, return its parent
+        if item_type == EntityItem and isinstance(item, PortItem) and item.parentItem():
+            return item.parentItem()
         rect = QRectF(self.mapToScene(pos) - QPointF(5,5), self.mapToScene(pos) + QPointF(5,5))
         items = [i for i in self.scene().items(rect) if isinstance(i, item_type)]
         return items[0] if items else None
@@ -65,18 +64,13 @@ class EditableGraphicsView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__(); self.setWindowTitle("Generic Diagram Annotator"); self.resize(1800, 1000)
-        self.diagram = Diagram()
-        self.pending_port_1 = None
+        self.diagram = Diagram(); self.pending_port_1 = None
         self.image_files, self.current_index = [], -1
         self.image_folder, self.raw_json_folder, self.project_folder = None, None, None
-        self.scene = QGraphicsScene(self)
-        self.entity_items, self.port_items = {}, {}
-
-        # FIX: Initialize edit_mode BEFORE calling _init_ui or set_edit_mode
+        self.scene = QGraphicsScene(self); self.entity_items, self.port_items = {}, {}
         self.edit_mode = 'component'
-        
         self._init_ui()
-        self.set_edit_mode('port') # Start in port mode
+        self.set_edit_mode('port')
 
     def _init_ui(self):
         self.setStyleSheet(DARK_THEME)
@@ -184,12 +178,23 @@ class MainWindow(QMainWindow):
             pixmap = QPixmap(str(self.diagram.image_path))
             self.scene.addItem(QGraphicsPixmapItem(pixmap)); self.scene.setSceneRect(QRectF(pixmap.rect()))
         for entity_id, entity in self.diagram.entities.items():
-            entity_item = EntityItem(entity); self.entity_items[entity_id] = entity_item
-            self.scene.addItem(entity_item); entity_item.setPos(QPointF(*entity.position))
-            for port_id, port in entity.ports.items():
-                port_item = PortItem(port, entity, parent_item=entity_item)
-                self.port_items[(entity_id, port_id)] = port_item
-                port_item.setPos(QPointF(*port.position))
+            if entity.box:
+                entity_item = EntityItem(entity)
+                self.entity_items[entity_id] = entity_item
+                self.scene.addItem(entity_item)
+                entity_item.setPos(QPointF(*entity.position))
+                for port_id, port in entity.ports.items():
+                    port_item = PortItem(port, entity, parent_item=entity_item)
+                    self.port_items[(entity_id, port_id)] = port_item
+                    port_item.setPos(QPointF(*port.position))
+            else: # Terminal
+                # For terminals, the Port is the primary visual item
+                port = next(iter(entity.ports.values()), None) # A terminal should have one port
+                if port:
+                    port_item = PortItem(port, entity, parent_item=None)
+                    self.port_items[(entity_id, port.id)] = port_item
+                    self.scene.addItem(port_item)
+                    port_item.setPos(QPointF(*entity.position))
         for conn in self.diagram.connections:
             ep1, ep2 = conn['endpoints']; key1, key2 = (ep1['entity_id'], ep1['port_id']), (ep2['entity_id'], ep2['port_id'])
             p_item1, p_item2 = self.port_items.get(key1), self.port_items.get(key2)
@@ -201,28 +206,15 @@ class MainWindow(QMainWindow):
         if self.edit_mode == mode and not force_update: return
         self.exit_special_modes(); self.edit_mode = mode
         self.act_comp_mode.setChecked(mode == 'component'); self.act_port_mode.setChecked(mode == 'port')
-        
         is_port_mode = mode == 'port'
-
-        for entity_item in self.entity_items.values():
-            is_terminal = entity_item.entity_model.box is None
-            
-            # A component box is movable ONLY in component mode.
-            # A terminal is movable ONLY in port mode.
-            can_move = (not is_port_mode and not is_terminal) or (is_port_mode and is_terminal)
-            entity_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, can_move)
-            
-            # An item should only be selectable if it's currently interactive.
-            # Component boxes are selectable in component mode.
-            # Terminals are selectable in port mode.
-            entity_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, can_move)
-
-        for port_item in self.port_items.values():
-            is_on_component = port_item.entity_model.box is not None
-            
-            # A port is movable ONLY in port mode AND if it's on a component.
-            can_move = is_port_mode and is_on_component
-            port_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, can_move)
+        for item in self.scene.items():
+            if isinstance(item, EntityItem):
+                item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, not is_port_mode)
+                item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, not is_port_mode)
+            elif isinstance(item, PortItem):
+                is_terminal = item.parentItem() is None
+                can_move = (is_port_mode and not is_terminal) or (is_port_mode and is_terminal)
+                item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, can_move)
     
     def enter_mode(self, mode_name):
         self.set_edit_mode('port' if mode_name in ['connect', 'add_port'] else 'component')
@@ -242,7 +234,7 @@ class MainWindow(QMainWindow):
     def delete_selected(self):
         for item in self.scene.selectedItems():
             if isinstance(item, EntityItem): self.diagram.delete_entity(item.entity_model.id)
-            elif isinstance(item, PortItem): self.diagram.delete_port(item.entity_model.id, item.port_model.id)
+            elif isinstance(item, PortItem): self.diagram.delete_entity(item.entity_model.id) if item.parentItem() is None else self.diagram.delete_port(item.entity_model.id, item.port_model.id)
             elif isinstance(item, ConnectionLineItem): self.diagram.delete_connection(item.connection_model['id'])
         self.refresh_scene_from_model()
 
@@ -301,14 +293,14 @@ class MainWindow(QMainWindow):
         if isinstance(item, EntityItem):
             m = item.entity_model; text = f"<b>Entity</b><br>Label: {m.label}<br>Type: {m.type}<br>ID: {m.id}<br>Ports: {len(m.ports)}"
         elif isinstance(item, PortItem):
-            m = item.port_model; text = f"<b>Port</b><br>Label: {m.label}<br>ID: {m.id}<br>Direction: {m.direction}"
+            m = item.port_model; em = item.entity_model; text = f"<b>Port on {em.label}</b><br>Label: {m.label}<br>ID: {m.id}<br>Direction: {m.direction}"
         elif isinstance(item, ConnectionLineItem):
             m = item.connection_model; text = f"<b>Connection</b><br>ID: {m['id']}<br>Label: {m.get('label','')}"
         self.info_label.setText(text)
 
     def show_context_menu(self, scene_pos, global_pos):
         menu = QMenu(self)
-        item = self.view.itemAt(self.view.mapFromScene(scene_pos))
+        item = self.view.get_item_at(self.view.mapToGlobal(self.view.mapFromScene(scene_pos)), QGraphicsItem)
         if isinstance(item, (PortItem, ConnectionLineItem, EntityItem)):
             item.setSelected(True); menu.addAction("Rename / Edit Label...", self.rename_selected)
         else:
