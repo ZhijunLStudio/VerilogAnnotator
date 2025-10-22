@@ -1,1 +1,0 @@
-pyinstaller --name="MyCoolApp" --windowed --onefile --icon="path/to/your/my_icon.ico" main.py
