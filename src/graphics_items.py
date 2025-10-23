@@ -2,11 +2,12 @@ from PyQt6.QtWidgets import QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsPa
 from PyQt6.QtGui import QPen, QBrush, QColor, QPainterPath
 from PyQt6.QtCore import Qt, QPointF
 
+# ... PortItem and EntityItem classes are correct and remain the same ...
 class PortItem(QGraphicsEllipseItem):
     def __init__(self, port_model, entity_model, parent_item=None):
         is_terminal = parent_item is None
-        radius = 8 if is_terminal else 5
-        super().__init__(-radius, -radius, radius*2, radius*2, parent=parent_item)
+        self.radius = 8 if is_terminal else 5
+        super().__init__(-self.radius, -self.radius, self.radius*2, self.radius*2, parent=parent_item)
         
         self.port_model, self.entity_model = port_model, entity_model
         self.connection_lines = []
@@ -30,13 +31,17 @@ class PortItem(QGraphicsEllipseItem):
             self.label.setPos(10, -8)
         self.update_tooltip()
 
+    def shape(self):
+        path = QPainterPath()
+        click_radius = self.radius + 4 
+        path.addEllipse(-click_radius, -click_radius, click_radius*2, click_radius*2)
+        return path
+
     def update_tooltip(self): self.setToolTip(f"Entity: {self.entity_model.label}\nPort: {self.port_model.label}\nID: {self.entity_model.id}")
 
     def itemChange(self, change, value):
-        # FIX: Restore boundary constraints for ports on components
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene() and self.parentItem():
             parent_rect = self.parentItem().boundingRect()
-            # Constrain 'value' (the proposed new position) within the parent's rectangle
             value.setX(max(parent_rect.left(), min(value.x(), parent_rect.right())))
             value.setY(max(parent_rect.top(), min(value.y(), parent_rect.bottom())))
 
@@ -45,10 +50,8 @@ class PortItem(QGraphicsEllipseItem):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged and self.scene():
             diagram = self.scene().parent().diagram
             is_terminal = self.parentItem() is None
-            if is_terminal:
-                diagram.update_entity_position(self.entity_model.id, [self.pos().x(), self.pos().y()])
-            else:
-                diagram.update_port_position(self.entity_model.id, self.port_model.id, [self.pos().x(), self.pos().y()])
+            if is_terminal: diagram.update_entity_position(self.entity_model.id, [self.pos().x(), self.pos().y()])
+            else: diagram.update_port_position(self.entity_model.id, self.port_model.id, [self.pos().x(), self.pos().y()])
             for line in self.connection_lines: line.update_path()
         return result
 
@@ -88,16 +91,11 @@ class EntityItem(QGraphicsRectItem):
 class GroupItem(QGraphicsRectItem):
     def __init__(self, group_model):
         self.group_model = group_model
-        # The box is [x, y, width, height]
         super().__init__(0, 0, group_model.box[2], group_model.box[3])
         self.setPos(group_model.box[0], group_model.box[1])
-        
-        self.setPen(QPen(QColor("#FFD700"), 3, Qt.PenStyle.DashDotLine)) # Gold, dashed line
-        self.setBrush(QBrush(QColor(255, 215, 0, 20))) # Transparent yellow fill
-        
+        self.setPen(QPen(QColor("#FFD700"), 3, Qt.PenStyle.DashDotLine)); self.setBrush(QBrush(QColor(255, 215, 0, 20)))
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
-        self.setZValue(-1) # Draw it behind components
-        
+        self.setZValue(-1)
         self.label = QGraphicsSimpleTextItem(group_model.label, self)
         self.label.setBrush(QBrush(QColor("#FFD700"))); font = self.label.font(); font.setPointSize(14); font.setBold(True); self.label.setFont(font)
         self.label.setPos(5, 5)
@@ -114,6 +112,7 @@ class ConnectionLineItem(QGraphicsPathItem):
         self.connection_model = connection_model; self.source_port = source_port_item; self.dest_port = dest_port_item
         self.source_port.connection_lines.append(self); self.dest_port.connection_lines.append(self)
         self.setPen(QPen(QColor("#1E90FF"), 2.5)); self.setZValue(1)
+        # This flag is still needed for the selection to be registered
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.label_item = None
         self.update_tooltip()
@@ -124,7 +123,20 @@ class ConnectionLineItem(QGraphicsPathItem):
         if self.scene() and self.source_port.scene() and self.dest_port.scene():
             path = QPainterPath(); path.moveTo(self.source_port.scenePos()); path.lineTo(self.dest_port.scenePos()); self.setPath(path)
             if self.label_item: self.label_item.setPos((self.source_port.scenePos() + self.dest_port.scenePos()) / 2)
-            
+    
+    # ### NEW: Override mousePressEvent to control selection ###
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            # If right-clicked, select the item
+            self.setSelected(True)
+            # We don't accept the event, so it propagates to the view for the context menu
+            super().mousePressEvent(event)
+        elif event.button() == Qt.MouseButton.LeftButton:
+            # If left-clicked, IGNORE the event so it passes to items underneath
+            event.ignore()
+        else:
+            super().mousePressEvent(event)
+
     def sceneEvent(self, event):
         if event.type() == 18:
              if self in self.source_port.connection_lines: self.source_port.connection_lines.remove(self)
