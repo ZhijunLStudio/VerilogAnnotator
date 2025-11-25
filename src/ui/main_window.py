@@ -14,6 +14,8 @@ from ..data_model import Diagram
 from ..graphics_items import EntityItem, PortItem, ConnectionLineItem, GroupItem
 from .style import DARK_THEME
 import json
+import sys
+import os
 
 class EditableGraphicsView(QGraphicsView):
     def __init__(self, scene, main_window):
@@ -146,30 +148,55 @@ class EditableGraphicsView(QGraphicsView):
 class ConfigManager:
     CONFIG_FILE = "annotation_config.json"
     
-    # 你的标准列表
     DEFAULT_TYPES = [
         "block", "PMOS", "NMOS", "Voltage", "Current", 
         "NPN", "PNP", "Diode", "Diso_amp", "Siso_amp", 
         "Cap", "Gnd", "Vdd", "Ind", "Res"
     ]
 
+    @staticmethod
+    def get_config_path():
+        """获取配置文件的真实绝对路径"""
+        if getattr(sys, 'frozen', False):
+            # === 打包环境 ===
+            # 获取 exe 文件所在的目录
+            base_path = os.path.dirname(sys.executable)
+        else:
+            # === 开发环境 ===
+            # 获取 main.py 所在的目录 (假设 main_window.py 在 src/ui 下)
+            # 我们往上找3级回到项目根目录
+            base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            
+        return os.path.join(base_path, ConfigManager.CONFIG_FILE)
+
     @classmethod
     def load_types(cls):
-        if Path(cls.CONFIG_FILE).exists():
+        config_path = cls.get_config_path()
+        
+        if os.path.exists(config_path):
             try:
-                with open(cls.CONFIG_FILE, 'r', encoding='utf-8') as f:
+                # 第一次尝试：标准的 UTF-8
+                with open(config_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    saved_types = data.get("component_types", [])
-                    # 合并去重
-                    combined = sorted(list(set(cls.DEFAULT_TYPES + saved_types)))
-                    return combined
-            except:
-                pass
+            except UnicodeDecodeError:
+                # 如果失败，尝试用 GBK (兼容 Windows 旧格式)
+                try:
+                    with open(config_path, 'r', encoding='gbk') as f:
+                        data = json.load(f)
+                except Exception:
+                    # 如果还不行，返回默认值，避免闪退
+                    return cls.DEFAULT_TYPES
+            except Exception:
+                return cls.DEFAULT_TYPES
+
+            saved_types = data.get("component_types", [])
+            combined = sorted(list(set(cls.DEFAULT_TYPES + saved_types)))
+            return combined
+            
         return cls.DEFAULT_TYPES
 
     @classmethod
     def save_new_type(cls, new_type):
-        # 只有当新类型不在默认列表里，且不为空时才保存
         if not new_type or new_type in cls.DEFAULT_TYPES:
             return
 
@@ -178,10 +205,13 @@ class ConfigManager:
             current_types.append(new_type)
             current_types.sort()
             try:
-                with open(cls.CONFIG_FILE, 'w', encoding='utf-8') as f:
+                config_path = cls.get_config_path()
+                with open(config_path, 'w', encoding='utf-8') as f:
                     json.dump({"component_types": current_types}, f, ensure_ascii=False, indent=2)
             except Exception as e:
-                print(f"Failed to save config: {e}")
+                # 这里如果报错，exception_hook 会捕获并弹窗
+                raise e
+            
 
 class ComponentCreationDialog(QDialog):
     """
