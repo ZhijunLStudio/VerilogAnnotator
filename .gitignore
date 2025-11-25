@@ -9,3 +9,5 @@
 .env
 .ipynb_checkpoints/
 venv/
+
+annotation_config.json

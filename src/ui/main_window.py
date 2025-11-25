@@ -1,9 +1,11 @@
+# src/ui/main_window.py
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QListWidget, QGraphicsView, 
     QGraphicsScene, QPushButton, QLabel, QStatusBar, QToolBar, QSplitter, 
     QMessageBox, QInputDialog, QGraphicsItem, QFileDialog, QGroupBox, QMenu,
-    QGraphicsSimpleTextItem, QGraphicsPixmapItem
+    QGraphicsSimpleTextItem, QGraphicsPixmapItem,
+    QComboBox, QDialog, QFormLayout, QDialogButtonBox, QLineEdit
 )
 from PyQt6.QtGui import QPainter, QAction, QKeySequence, QPixmap, QPen, QColor, QCursor, QBrush
 from PyQt6.QtCore import Qt, QPointF, QRectF
@@ -11,6 +13,7 @@ from PyQt6.QtCore import Qt, QPointF, QRectF
 from ..data_model import Diagram
 from ..graphics_items import EntityItem, PortItem, ConnectionLineItem, GroupItem
 from .style import DARK_THEME
+import json
 
 class EditableGraphicsView(QGraphicsView):
     def __init__(self, scene, main_window):
@@ -139,6 +142,124 @@ class EditableGraphicsView(QGraphicsView):
         rect = QRectF(self.mapToScene(pos) - QPointF(5,5), self.mapToScene(pos) + QPointF(5,5))
         items = [i for i in self.scene().items(rect) if isinstance(i, item_type)]
         return items[0] if items else None
+
+class ConfigManager:
+    CONFIG_FILE = "annotation_config.json"
+    
+    # 你的标准列表
+    DEFAULT_TYPES = [
+        "block", "PMOS", "NMOS", "Voltage", "Current", 
+        "NPN", "PNP", "Diode", "Diso_amp", "Siso_amp", 
+        "Cap", "Gnd", "Vdd", "Ind", "Res"
+    ]
+
+    @classmethod
+    def load_types(cls):
+        if Path(cls.CONFIG_FILE).exists():
+            try:
+                with open(cls.CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    saved_types = data.get("component_types", [])
+                    # 合并去重
+                    combined = sorted(list(set(cls.DEFAULT_TYPES + saved_types)))
+                    return combined
+            except:
+                pass
+        return cls.DEFAULT_TYPES
+
+    @classmethod
+    def save_new_type(cls, new_type):
+        # 只有当新类型不在默认列表里，且不为空时才保存
+        if not new_type or new_type in cls.DEFAULT_TYPES:
+            return
+
+        current_types = cls.load_types()
+        if new_type not in current_types:
+            current_types.append(new_type)
+            current_types.sort()
+            try:
+                with open(cls.CONFIG_FILE, 'w', encoding='utf-8') as f:
+                    json.dump({"component_types": current_types}, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"Failed to save config: {e}")
+
+class ComponentCreationDialog(QDialog):
+    """
+    整合弹窗：包含显式的“自定义”选项逻辑
+    """
+    def __init__(self, parent=None, default_types=[]):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Component Details")
+        self.setModal(True)
+        self.resize(350, 150)
+        
+        layout = QFormLayout(self)
+        
+        # 1. Label 输入框
+        self.label_edit = QLineEdit()
+        self.label_edit.setPlaceholderText("e.g. R1, Block_A")
+        layout.addRow("Label:", self.label_edit)
+        
+        # 2. Type 选择框
+        self.type_combo = QComboBox()
+        self.type_combo.setEditable(False) # 平时不可编辑，只能选
+        
+        # 添加默认选项
+        self.type_combo.addItems(default_types)
+        
+        # 添加显式的自定义选项
+        self.CUSTOM_OPTION = "--- 自定义 (Custom) ---"
+        self.type_combo.addItem(self.CUSTOM_OPTION)
+        
+        # 绑定选择改变事件
+        self.type_combo.currentIndexChanged.connect(self.on_type_changed)
+        
+        layout.addRow("Type:", self.type_combo)
+        
+        # 3. 按钮
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+        
+        self.label_edit.setFocus()
+
+    def on_type_changed(self, index):
+        """当用户选中 '自定义' 时触发"""
+        current_text = self.type_combo.itemText(index)
+        
+        if current_text == self.CUSTOM_OPTION:
+            # 弹出输入框询问新类型
+            new_type, ok = QInputDialog.getText(self, "Custom Type", "Enter new component type name:")
+            
+            if ok and new_type.strip():
+                clean_type = new_type.strip()
+                
+                # 检查是否已存在
+                existing_index = self.type_combo.findText(clean_type)
+                if existing_index != -1:
+                    # 已存在，直接选中
+                    self.type_combo.setCurrentIndex(existing_index)
+                else:
+                    # 不存在，插入到“自定义”选项的前面
+                    insert_idx = self.type_combo.count() - 1
+                    self.type_combo.insertItem(insert_idx, clean_type)
+                    # 选中这个新插入的项
+                    self.type_combo.setCurrentIndex(insert_idx)
+            else:
+                # 用户取消或输入为空，重置回第一个选项（防止停留在“自定义”上）
+                self.type_combo.setCurrentIndex(0)
+
+    def get_data(self):
+        # 返回 Label 和 当前选中的Type
+        # 注意：如果用户还停留在 "--- 自定义 ---" 选项上（比如点击了取消），我们要防止把这个字符串存进去
+        type_text = self.type_combo.currentText()
+        if type_text == self.CUSTOM_OPTION:
+            type_text = "block" # 回退默认值
+            
+        return self.label_edit.text().strip(), type_text
+    
+    
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -273,11 +394,26 @@ class MainWindow(QMainWindow):
         if not self.image_files: return
         new_index = (self.current_index + direction) % len(self.image_files)
         self.file_list.setCurrentRow(new_index)
+        
+    def zoom_to_fit(self):
+        """强制将图片缩放至适应窗口大小"""
+        if not self.scene.items():
+            return
+            
+        # 获取场景内容的实际边界
+        scene_rect = self.scene.itemsBoundingRect()
+        # 设置场景的边界，确保没有多余空白
+        self.scene.setSceneRect(scene_rect)
+        
+        # 核心：FitInView
+        # KeepAspectRatio: 保持宽高比，不会拉伸变形
+        self.view.fitInView(scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
 
+    # === 更新 load_diagram ===
     def load_diagram(self):
         if not (0 <= self.current_index < len(self.image_files)): return
         
-        # 切换图片时重置视图缩放和平移
+        # 1. 重置旧的缩放
         self.view.resetTransform()
         
         img_path = self.image_files[self.current_index]
@@ -306,8 +442,10 @@ class MainWindow(QMainWindow):
             pixmap = QPixmap(str(img_path))
             self.scene.addItem(QGraphicsPixmapItem(pixmap))
             self.scene.setSceneRect(QRectF(pixmap.rect()))
-            # 空项目也要初始化一下图片路径，防止保存时出错
             self.diagram.image_path = img_path
+
+        # 2. 关键：加载完成后自动适配窗口
+        self.zoom_to_fit()
 
     def save_current_changes(self):
         if not (self.diagram and self.diagram.image_path): return
@@ -438,29 +576,74 @@ class MainWindow(QMainWindow):
             self.exit_special_modes()
             self.refresh_scene_from_model()
             
+    # 替换原有的 handle_add_port_click
     def handle_add_port_click(self, scene_pos, entity_item):
-        if not entity_item: 
-            self.exit_special_modes()
-            return
-        label, ok = QInputDialog.getText(self, "New Port", "Enter port label:")
-        if ok and label:
-            direction, ok2 = QInputDialog.getItem(self, "Port Direction", "Select direction:", ["input", "output", "inout"], 0, False)
-            if ok2:
-                rel_pos = entity_item.mapFromScene(scene_pos)
-                self.diagram.add_port(entity_item.entity_model.id, label, direction, [rel_pos.x(), rel_pos.y()])
+        """
+        处理添加端口/节点的点击事件
+        - 如果点击在组件上: 添加该组件的一个端口
+        - 如果点击在空白处: 创建一个新的 Terminal (外部端口)
+        """
+        if entity_item:
+            # === Case A: 给现有组件添加端口 ===
+            label, ok = QInputDialog.getText(self, "New Port", "Enter port label:")
+            if ok and label:
+                direction, ok2 = QInputDialog.getItem(self, "Port Direction", "Select direction:", ["input", "output", "inout"], 0, False)
+                if ok2:
+                    rel_pos = entity_item.mapFromScene(scene_pos)
+                    self.diagram.add_port(entity_item.entity_model.id, label, direction, [rel_pos.x(), rel_pos.y()])
+        else:
+            # === Case B: 在空白处创建 Terminal (修复点) ===
+            label, ok = QInputDialog.getText(self, "New Terminal", "Enter terminal label (e.g., Vin, Gnd):")
+            if ok and label:
+                # 1. 创建 Terminal Entity (box=None)
+                # 使用 scene_pos 作为绝对坐标
+                entity = self.diagram.add_entity(label, "Terminal", None, [scene_pos.x(), scene_pos.y()])
+                
+                # 2. 自动给 Terminal 添加一个默认端口 (通常位于 0,0)
+                self.diagram.add_port(entity.id, "io", "inout", [0, 0])
+                
         self.exit_special_modes()
         self.refresh_scene_from_model()
 
+    # 替换原有的 create_new_drawn_item
     def create_new_drawn_item(self, box):
-        choice, ok = QInputDialog.getItem(self, "Create New Item", "What did you draw?", ["Component", "Group"], 0, False)
+        """
+        处理画框结束后的逻辑
+        - 弹出自定义对话框选择类型
+        - 保存新的自定义类型
+        """
+        # 1. 先询问是 Component 还是 Group (这一步保留，因为是两种完全不同的实体)
+        # 使用 getItem 比较简洁，也不会在左上角乱跳
+        choice, ok = QInputDialog.getItem(self, "Select Entity Type", "Create:", ["Component", "Group"], 0, False)
         if not ok: return
-        label, ok = QInputDialog.getText(self, f"New {choice}", f"Enter {choice.lower()} label:")
-        if ok and label:
-            if choice == "Component":
-                self.diagram.add_entity(label, "Component", [box.width(), box.height()], [box.x(), box.y()])
-            else: # Group
+
+        if choice == "Group":
+            label, ok = QInputDialog.getText(self, "New Group", "Enter group label:")
+            if ok and label:
                 self.diagram.add_group(label, [box.x(), box.y(), box.width(), box.height()])
-            self.refresh_scene_from_model()
+                self.refresh_scene_from_model()
+                
+        else: # Choice is Component
+            # 2. 弹出整合对话框
+            # 加载历史类型列表
+            current_types = ConfigManager.load_types()
+            dialog = ComponentCreationDialog(self, current_types)
+            
+            # exec() 会阻塞直到用户关闭窗口
+            if dialog.exec():
+                label, type_name = dialog.get_data()
+                
+                if label:
+                    # 如果用户没填类型，默认给个 block
+                    if not type_name: 
+                        type_name = "block"
+                    
+                    # 3. 如果是新输入的类型，保存到配置文件
+                    ConfigManager.save_new_type(type_name)
+                    
+                    # 4. 创建实体
+                    self.diagram.add_entity(label, type_name, [box.width(), box.height()], [box.x(), box.y()])
+                    self.refresh_scene_from_model()
             
     def auto_layout_component_ports(self):
         for entity in self.diagram.entities.values():

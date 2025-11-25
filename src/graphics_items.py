@@ -1,8 +1,9 @@
+# src/graphics_items.py
 from PyQt6.QtWidgets import QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsItem, QGraphicsTextItem, QGraphicsSimpleTextItem
 from PyQt6.QtGui import QPen, QBrush, QColor, QPainterPath
 from PyQt6.QtCore import Qt, QPointF
 
-# ... PortItem and EntityItem classes are correct and remain the same ...
+
 class PortItem(QGraphicsEllipseItem):
     def __init__(self, port_model, entity_model, parent_item=None):
         is_terminal = parent_item is None

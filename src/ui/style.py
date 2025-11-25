@@ -1,3 +1,4 @@
+# src/ui/style.py
 DARK_THEME = """
     QMainWindow, QToolBar, QDialog {
         background-color: #333;
