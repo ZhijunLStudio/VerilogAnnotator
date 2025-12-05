@@ -1,3 +1,4 @@
+# src/graphics_items.py
 from PyQt6.QtWidgets import QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsItem, QGraphicsTextItem, QGraphicsSimpleTextItem
 from PyQt6.QtGui import QPen, QBrush, QColor, QPainterPath
 from PyQt6.QtCore import Qt, QPointF
@@ -111,7 +112,9 @@ class ConnectionLineItem(QGraphicsPathItem):
         super().__init__()
         self.connection_model = connection_model; self.source_port = source_port_item; self.dest_port = dest_port_item
         self.source_port.connection_lines.append(self); self.dest_port.connection_lines.append(self)
-        self.setPen(QPen(QColor("#1E90FF"), 2.5)); self.setZValue(1)
+        # self.setPen(QPen(QColor("#1E90FF"), 2.5)); self.setZValue(1)
+        # self.setPen(QPen(QColor("yellow"), 2.5)); self.setZValue(1)
+        self.setPen(QPen(QColor("#FFD700"), 2.5)); self.setZValue(1)
         # This flag is still needed for the selection to be registered
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.label_item = None
