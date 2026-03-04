@@ -64,12 +64,134 @@ class Diagram:
         self.components = {}
         self.external_ports = {}
         self.connections = []
+        
+        # 撤销/重做栈
+        self._undo_stack = []
+        self._redo_stack = []
+        self._max_undo_steps = 50  # 最大撤销步数
 
     def clear(self):
         self.image_path = None
         self.components.clear()
         self.external_ports.clear()
         self.connections.clear()
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+    
+    def _save_state(self):
+        """保存当前状态到撤销栈"""
+        state = {
+            "components": deepcopy({cid: c.to_dict() for cid, c in self.components.items()}),
+            "external_ports": deepcopy({pid: p.to_dict() for pid, p in self.external_ports.items()}),
+            "connections": deepcopy([c.to_dict() for c in self.connections])
+        }
+        self._undo_stack.append(state)
+        
+        # 限制撤销栈大小
+        if len(self._undo_stack) > self._max_undo_steps:
+            self._undo_stack.pop(0)
+        
+        # 清空重做栈
+        self._redo_stack.clear()
+    
+    def can_undo(self):
+        """检查是否可以撤销"""
+        return len(self._undo_stack) > 0
+    
+    def can_redo(self):
+        """检查是否可以重做"""
+        return len(self._redo_stack) > 0
+    
+    def undo(self):
+        """撤销上一步操作"""
+        if not self.can_undo():
+            return False
+        
+        # 保存当前状态到重做栈
+        current_state = {
+            "components": deepcopy({cid: c.to_dict() for cid, c in self.components.items()}),
+            "external_ports": deepcopy({pid: p.to_dict() for pid, p in self.external_ports.items()}),
+            "connections": deepcopy([c.to_dict() for c in self.connections])
+        }
+        self._redo_stack.append(current_state)
+        
+        # 恢复上一个状态
+        state = self._undo_stack.pop()
+        self._restore_state(state)
+        return True
+    
+    def redo(self):
+        """重做上一步撤销的操作"""
+        if not self.can_redo():
+            return False
+        
+        # 保存当前状态到撤销栈
+        current_state = {
+            "components": deepcopy({cid: c.to_dict() for cid, c in self.components.items()}),
+            "external_ports": deepcopy({pid: p.to_dict() for pid, p in self.external_ports.items()}),
+            "connections": deepcopy([c.to_dict() for c in self.connections])
+        }
+        self._undo_stack.append(current_state)
+        
+        # 恢复重做状态
+        state = self._redo_stack.pop()
+        self._restore_state(state)
+        return True
+    
+    def _restore_state(self, state):
+        """从状态恢复数据"""
+        # 清空当前数据
+        self.components.clear()
+        self.external_ports.clear()
+        self.connections.clear()
+        
+        # 恢复 components
+        for cid, cdata in state.get("components", {}).items():
+            shape = cdata.get("shape")
+            if not shape:
+                box = cdata.get("box")
+                if box:
+                    shape = {"type": "rect", "box": box}
+                else:
+                    shape = {"type": "rect", "box": [0, 0, 100, 100]}
+            
+            component = Component(
+                id=cid,
+                type=cdata.get("type", "unknown"),
+                shape=shape,
+                parent=cdata.get("parent"),
+                children=cdata.get("children", []),
+                references=cdata.get("references", [])
+            )
+            
+            # 恢复端口
+            ports_data = cdata.get("ports", {})
+            if isinstance(ports_data, dict):
+                for pid, pdata in ports_data.items():
+                    port = Port(pid, pdata.get("coord", [0, 0]))
+                    component.ports[pid] = port
+            elif isinstance(ports_data, list):
+                for pdata in ports_data:
+                    pid = pdata.get("name", pdata.get("id", "unknown"))
+                    port = Port(pid, pdata.get("coord", [0, 0]))
+                    component.ports[pid] = port
+            
+            self.components[cid] = component
+        
+        # 恢复 external_ports
+        for pid, pdata in state.get("external_ports", {}).items():
+            port = ExternalPort(
+                id=pid,
+                type=pdata.get("type", "unknown"),
+                coord=pdata.get("coord", [0, 0])
+            )
+            self.external_ports[pid] = port
+        
+        # 恢复 connections
+        for cdata in state.get("connections", []):
+            nodes = cdata.get("nodes", [])
+            if nodes:
+                self.connections.append(Connection(nodes))
 
     def get_shape_position(self, shape):
         """获取 shape 的左上角坐标用于命名"""
@@ -95,6 +217,9 @@ class Diagram:
 
     def add_component(self, base_name, type, shape, parent=None):
         """添加组件，自动重命名"""
+        # 保存状态用于撤销
+        self._save_state()
+        
         pos = self.get_shape_position(shape)
         unique_id = self.generate_unique_name(base_name, pos)
         
@@ -110,6 +235,9 @@ class Diagram:
 
     def add_external_port(self, base_name, type, coord):
         """添加外部端口，自动重命名"""
+        # 保存状态用于撤销
+        self._save_state()
+        
         unique_id = self.generate_unique_name(base_name, coord)
         
         port = ExternalPort(unique_id, type, coord)
@@ -126,6 +254,9 @@ class Diagram:
         # 检查坐标是否在父组件范围内
         if not self.is_point_in_shape(coord, component.shape):
             return None
+        
+        # 保存状态用于撤销
+        self._save_state()
         
         port = Port(port_id, coord)
         component.ports[port_id] = port
@@ -163,6 +294,9 @@ class Diagram:
         if component_id not in self.components:
             return False
         
+        # 保存状态用于撤销
+        self._save_state()
+        
         component = self.components[component_id]
         
         # 递归删除子组件
@@ -184,10 +318,54 @@ class Diagram:
         del self.components[component_id]
         return True
 
+    def delete_component_only(self, component_id):
+        """只删除组件本身，不删除子组件，子组件的 parent 设为 None
+        
+        同时从子组件的 references 中移除对该组件的引用
+        """
+        if component_id not in self.components:
+            return False
+        
+        # 保存状态用于撤销
+        self._save_state()
+        
+        component = self.components[component_id]
+        
+        # 将所有子组件的 parent 设为 None
+        for child_id in component.children[:]:
+            if child_id in self.components:
+                self.components[child_id].parent = None
+        
+        # 从其他组件的 references 中移除对该组件的引用
+        for comp in self.components.values():
+            if component_id in comp.references:
+                comp.references.remove(component_id)
+        
+        # 从父组件的 children 中移除
+        if component.parent and component.parent in self.components:
+            parent = self.components[component.parent]
+            if component_id in parent.children:
+                parent.children.remove(component_id)
+        
+        # 删除相关连接
+        self.connections = [
+            c for c in self.connections 
+            if not any(n.get("component") == component_id for n in c.nodes)
+        ]
+        
+        # 清空子组件列表（因为已经被移出）
+        component.children.clear()
+        
+        del self.components[component_id]
+        return True
+
     def delete_external_port(self, port_id):
         """删除外部端口"""
         if port_id not in self.external_ports:
             return False
+        
+        # 保存状态用于撤销
+        self._save_state()
         
         # 删除相关连接
         self.connections = [
@@ -203,6 +381,9 @@ class Diagram:
         component = self.components.get(component_id)
         if not component or port_id not in component.ports:
             return False
+        
+        # 保存状态用于撤销
+        self._save_state()
         
         # 删除相关连接
         self.connections = [
@@ -232,6 +413,9 @@ class Diagram:
                 if port_id not in self.components[comp_id].ports:
                     return False
         
+        # 保存状态用于撤销
+        self._save_state()
+        
         conn = Connection(nodes)
         self.connections.append(conn)
         return True
@@ -239,6 +423,9 @@ class Diagram:
     def delete_connection(self, index):
         """删除连接（按索引）"""
         if 0 <= index < len(self.connections):
+            # 保存状态用于撤销
+            self._save_state()
+            
             del self.connections[index]
             return True
         return False

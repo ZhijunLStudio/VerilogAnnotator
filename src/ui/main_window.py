@@ -250,9 +250,21 @@ class EditableGraphicsView(QGraphicsView):
 
     def _update_temp_connection_line(self, current_pos):
         """更新临时连线"""
+        # 检查 pending_port 是否有效
+        if not self.main_window.pending_port:
+            return
+        
+        # 检查 pending_port 是否仍在场景中
+        try:
+            if not self.main_window.pending_port.scene():
+                return
+            start_pos = self.main_window.pending_port.scenePos()
+        except RuntimeError:
+            # 端口项可能已被删除
+            return
+        
         if not hasattr(self, '_temp_line') or self._temp_line is None:
             from PyQt6.QtWidgets import QGraphicsLineItem
-            start_pos = self.main_window.pending_port.scenePos()
             self._temp_line = self.scene().addLine(
                 start_pos.x(), start_pos.y(),
                 current_pos.x(), current_pos.y(),
@@ -260,7 +272,6 @@ class EditableGraphicsView(QGraphicsView):
             )
             self._temp_line.setZValue(10)
         else:
-            start_pos = self.main_window.pending_port.scenePos()
             self._temp_line.setLine(start_pos.x(), start_pos.y(),
                                    current_pos.x(), current_pos.y())
 
@@ -720,7 +731,17 @@ class MainWindow(QMainWindow):
                 item.setOpacity(0.3)
 
             # 添加端口 - 使用组件的颜色
-            if comp_id in self.expanded_containers or component.type != "container":
+            # 检查是否需要创建端口：1) 容器已展开 2) 不是容器 3) 端口有连接
+            has_connection = False
+            for conn in self.diagram.connections:
+                for node in conn.nodes:
+                    if node.get("component") == comp_id:
+                        has_connection = True
+                        break
+                if has_connection:
+                    break
+            
+            if comp_id in self.expanded_containers or component.type != "container" or has_connection:
                 for port_id, port in component.ports.items():
                     port_item = PortItem(port, component, parent_item=item)
                     port_item.setPos(QPointF(port.coord[0] - item.pos().x(),
@@ -743,9 +764,7 @@ class MainWindow(QMainWindow):
                 item.setOpacity(0.3)
 
         # 添加连线
-        print(f"[DEBUG] Creating connections...")
         self._create_connection_items_with_junctions()
-        print(f"[DEBUG] refresh_scene completed")
 
     def _create_connection_items_with_junctions(self):
         """创建连线项，并检测交汇点创建枢纽"""
@@ -1520,18 +1539,49 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", "Port must be inside component!")
 
     def handle_add_external_port_click(self, scene_pos):
-        """处理添加外部端口点击"""
-        # 获取端口名称和类型
-        port_name, ok = QInputDialog.getText(self, "External Port Name", "Enter port name:",
-                                            text="Vdd")
-        if not ok or not port_name:
+        """处理添加外部端口点击 - 使用合并弹窗"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, QPushButton
+
+        # 创建自定义对话框
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add External Port")
+        dialog.setMinimumWidth(300)
+
+        layout = QVBoxLayout(dialog)
+
+        # 端口名称输入
+        layout.addWidget(QLabel("Port Name:"))
+        name_input = QLineEdit("Vdd")
+        layout.addWidget(name_input)
+
+        # 端口类型选择
+        layout.addWidget(QLabel("Port Type:"))
+        type_combo = QComboBox()
+        type_combo.addItems(["terminal", "label"])
+        type_combo.setCurrentText("terminal")  # 默认选择 terminal
+        layout.addWidget(type_combo)
+
+        # 按钮
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("OK")
+        cancel_button = QPushButton("Cancel")
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+
+        # 绑定按钮事件
+        ok_button.clicked.connect(dialog.accept)
+        cancel_button.clicked.connect(dialog.reject)
+
+        # 显示对话框
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        port_types = ["terminal", "label"]
-        port_type, ok = QInputDialog.getItem(self, "Port Type", "Select type:",
-                                            port_types, 0, False)
-        if not ok:
+        port_name = name_input.text().strip()
+        if not port_name:
             return
+
+        port_type = type_combo.currentText()
 
         # 添加外部端口
         coord = [int(scene_pos.x()), int(scene_pos.y())]
@@ -1544,7 +1594,57 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Added external port: {port.id}", 2000)
 
     def handle_connection_click(self, scene_pos):
-        """处理连接点击 - 支持端口吸附"""
+        """处理连接点击 - 支持端口吸附和质心连接"""
+        # 如果已经有待选端口，检查是否点击了质心（加入现有连接）
+        if self.pending_port:
+            clicked_centroid = None
+            for item in self.view.items(self.view.mapFromScene(scene_pos)):
+                if isinstance(item, ConnectionCentroidItem):
+                    clicked_centroid = item
+                    break
+            
+            if clicked_centroid:
+                # 点击了质心，将当前端口加入这个连接
+                try:
+                    # 获取新端口信息
+                    if isinstance(self.pending_port, ExternalPortItem):
+                        new_node = {"component": "external", "port": self.pending_port.port_model.id}
+                    else:
+                        new_node = {
+                            "component": self.pending_port.component_model.id,
+                            "port": self.pending_port.port_model.id
+                        }
+                    
+                    # 检查端口是否已经在连接中
+                    conn_model = clicked_centroid.connection_model
+                    for node in conn_model.nodes:
+                        if node == new_node:
+                            self.statusBar().showMessage("Port already in this connection", 2000)
+                            self.pending_port = None
+                            self.exit_drawing_mode()
+                            return
+                    
+                    # 添加到现有连接 - 直接修改数据模型
+                    conn_model.nodes.append(new_node)
+                    
+                    # 清除状态
+                    self.pending_port = None
+                    self.statusBar().showMessage("Port added to connection", 2000)
+                    self.exit_drawing_mode()
+                    
+                    # 延迟刷新场景，避免在事件处理中直接刷新导致闪退
+                    from PyQt6.QtCore import QTimer
+                    QTimer.singleShot(10, self.refresh_scene)
+                    return
+                except Exception as e:
+                    import traceback
+                    print(f"Error adding to connection: {e}")
+                    print(f"Traceback: {traceback.format_exc()}")
+                    self.statusBar().showMessage(f"Error: {str(e)}", 3000)
+                    self.pending_port = None
+                    self.exit_drawing_mode()
+                    return
+        
         # 查找点击的端口（优先直接命中）
         clicked_port = None
 
@@ -1602,7 +1702,7 @@ class MainWindow(QMainWindow):
             self.pending_port = clicked_port
             clicked_port.setBrush(QBrush(QColor("lime")))
             port_info = f"{clicked_port.component_model.id}.{clicked_port.port_model.id}" if hasattr(clicked_port, 'component_model') else f"external.{clicked_port.port_model.id}"
-            self.statusBar().showMessage(f"First port: {port_info}. Select second port...")
+            self.statusBar().showMessage(f"First port: {port_info}. Select second port or centroid...")
         else:
             # 第二个端口
             if self.pending_port != clicked_port:
@@ -1633,8 +1733,11 @@ class MainWindow(QMainWindow):
 
                     # 添加到模型
                     if self.diagram.add_connection(nodes):
-                        self.refresh_scene()
                         self.statusBar().showMessage("Connection created", 2000)
+                        
+                        # 延迟刷新场景，避免在事件处理中直接刷新导致闪退
+                        from PyQt6.QtCore import QTimer
+                        QTimer.singleShot(10, self.refresh_scene)
                 except Exception as e:
                     import traceback
                     print(f"Error creating connection: {e}")
@@ -1741,6 +1844,8 @@ class MainWindow(QMainWindow):
 
     def delete_selected(self):
         """删除选中的项"""
+        from PyQt6.QtWidgets import QMessageBox
+
         # 先收集所有要删除的项，避免在遍历时修改
         items_to_delete = list(self.scene.selectedItems())
 
@@ -1803,7 +1908,36 @@ class MainWindow(QMainWindow):
         # 处理其他删除（组件、端口等）
         for item in items_to_delete:
             if isinstance(item, ComponentItem):
-                self.diagram.delete_component(item.component_model.id)
+                component = item.component_model
+                # 检查是否有子组件
+                if component.children:
+                    # 弹出选项对话框
+                    msg_box = QMessageBox(self)
+                    msg_box.setWindowTitle("Delete Component")
+                    msg_box.setText(f"Component '{component.id}' has {len(component.children)} child(ren).")
+                    msg_box.setInformativeText("How would you like to delete it?")
+                    
+                    # 添加自定义按钮
+                    delete_all_btn = msg_box.addButton("Delete All", QMessageBox.ButtonRole.DestructiveRole)
+                    delete_parent_only_btn = msg_box.addButton("Delete Parent Only", QMessageBox.ButtonRole.AcceptRole)
+                    cancel_btn = msg_box.addButton(QMessageBox.StandardButton.Cancel)
+                    
+                    msg_box.exec()
+                    
+                    clicked_btn = msg_box.clickedButton()
+                    
+                    if clicked_btn == cancel_btn:
+                        # 取消删除，跳过这个组件
+                        continue
+                    elif clicked_btn == delete_all_btn:
+                        # 删除父组件和子组件
+                        self.diagram.delete_component(component.id)
+                    elif clicked_btn == delete_parent_only_btn:
+                        # 只删除父组件，子组件的 parent 设为 None
+                        self.diagram.delete_component_only(component.id)
+                else:
+                    # 没有子组件，直接删除
+                    self.diagram.delete_component(component.id)
             elif isinstance(item, ExternalPortItem):
                 self.diagram.delete_external_port(item.port_model.id)
             elif isinstance(item, PortItem):
@@ -2281,17 +2415,49 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", "Port must be inside component!")
 
     def _quick_add_external_port(self, scene_pos):
-        """快速添加外部端口"""
-        port_name, ok = QInputDialog.getText(self, "External Port Name", "Enter port name:",
-                                            text="Vdd")
-        if not ok or not port_name:
+        """快速添加外部端口 - 使用合并弹窗"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, QPushButton
+
+        # 创建自定义对话框
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add External Port")
+        dialog.setMinimumWidth(300)
+
+        layout = QVBoxLayout(dialog)
+
+        # 端口名称输入
+        layout.addWidget(QLabel("Port Name:"))
+        name_input = QLineEdit("Vdd")
+        layout.addWidget(name_input)
+
+        # 端口类型选择
+        layout.addWidget(QLabel("Port Type:"))
+        type_combo = QComboBox()
+        type_combo.addItems(["terminal", "label"])
+        type_combo.setCurrentText("terminal")  # 默认选择 terminal
+        layout.addWidget(type_combo)
+
+        # 按钮
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("OK")
+        cancel_button = QPushButton("Cancel")
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+
+        # 绑定按钮事件
+        ok_button.clicked.connect(dialog.accept)
+        cancel_button.clicked.connect(dialog.reject)
+
+        # 显示对话框
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        port_types = ["terminal", "label"]
-        port_type, ok = QInputDialog.getItem(self, "Port Type", "Select type:",
-                                            port_types, 0, False)
-        if not ok:
+        port_name = name_input.text().strip()
+        if not port_name:
             return
+
+        port_type = type_combo.currentText()
 
         coord = [int(scene_pos.x()), int(scene_pos.y())]
         port = self.diagram.add_external_port(port_name, port_type, coord)
@@ -2428,12 +2594,34 @@ class MainWindow(QMainWindow):
             self.delete_selected()
         elif event.key() == Qt.Key.Key_S and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             self.save_current()
+        elif event.key() == Qt.Key.Key_Z and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            self.undo()
+        elif event.key() == Qt.Key.Key_Y and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            self.redo()
         elif event.key() == Qt.Key.Key_A:
             self.navigate_image(-1)
         elif event.key() == Qt.Key.Key_D:
             self.navigate_image(1)
         else:
             super().keyPressEvent(event)
+
+    def undo(self):
+        """撤销上一步操作"""
+        if self.diagram.undo():
+            self.refresh_scene()
+            self.update_hierarchy_tree()
+            self.statusBar().showMessage("Undo successful", 2000)
+        else:
+            self.statusBar().showMessage("Nothing to undo", 2000)
+
+    def redo(self):
+        """重做上一步撤销的操作"""
+        if self.diagram.redo():
+            self.refresh_scene()
+            self.update_hierarchy_tree()
+            self.statusBar().showMessage("Redo successful", 2000)
+        else:
+            self.statusBar().showMessage("Nothing to redo", 2000)
 
     def navigate_image(self, direction):
         """导航图片"""

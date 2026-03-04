@@ -80,9 +80,17 @@ class PortItem(QGraphicsEllipseItem):
             new_pos = self.scenePos()
             self.port_model.coord = [int(new_pos.x()), int(new_pos.y())]
             
-            # 更新连线
+            # 更新连线，过滤掉已被删除的线段
+            valid_lines = []
             for line in self.connection_lines:
-                line.update_path()
+                try:
+                    if line.scene():  # 检查线段是否仍在场景中
+                        line.update_path()
+                        valid_lines.append(line)
+                except RuntimeError:
+                    # 线段已被删除，跳过
+                    pass
+            self.connection_lines = valid_lines
         
         return result
 
@@ -264,8 +272,17 @@ class ComponentItem(QGraphicsItem):
                 if isinstance(child, PortItem):
                     child_pos = child.scenePos()
                     child.port_model.coord = [int(child_pos.x()), int(child_pos.y())]
+                    # 更新连接线段位置，过滤掉已被删除的线段
+                    valid_lines = []
                     for line in child.connection_lines:
-                        line.update_path()
+                        try:
+                            if line.scene():  # 检查线段是否仍在场景中
+                                line.update_path()
+                                valid_lines.append(line)
+                        except RuntimeError:
+                            # 线段已被删除，跳过
+                            pass
+                    child.connection_lines = valid_lines
             
             # 通知场景更新质心位置（使用延迟更新避免频繁刷新）
             if self.scene() and hasattr(self.scene(), 'parent'):
@@ -335,8 +352,17 @@ class ExternalPortItem(QGraphicsEllipseItem):
             new_pos = self.scenePos()
             self.port_model.coord = [int(new_pos.x()), int(new_pos.y())]
             
+            # 更新连接线段位置，过滤掉已被删除的线段
+            valid_lines = []
             for line in self.connection_lines:
-                line.update_path()
+                try:
+                    if line.scene():  # 检查线段是否仍在场景中
+                        line.update_path()
+                        valid_lines.append(line)
+                except RuntimeError:
+                    # 线段已被删除，跳过
+                    pass
+            self.connection_lines = valid_lines
             
             # 通知场景更新质心位置
             if self.scene() and hasattr(self.scene(), 'parent'):
@@ -465,7 +491,11 @@ class ConnectionCentroidItem(QGraphicsEllipseItem):
     def update_segments(self):
         """更新所有关联的线段"""
         for segment in self.segment_items:
-            segment.update_path()
+            try:
+                if segment.scene():
+                    segment.update_path()
+            except RuntimeError:
+                pass
 
     def update_tooltip(self):
         nodes_info = " → ".join([
@@ -479,17 +509,25 @@ class ConnectionCentroidItem(QGraphicsEllipseItem):
         self.setPen(QPen(QColor("lime"), 3))
         # 高亮所有关联的线段
         for segment in self.segment_items:
-            segment.setPen(QPen(QColor("lime"), 3))
+            try:
+                if segment.scene():
+                    segment.setPen(QPen(QColor("lime"), 3))
+            except RuntimeError:
+                pass
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):
         self.setPen(QPen(QColor("#B8860B"), 2))
         # 恢复线段颜色
         for segment in self.segment_items:
-            if segment.is_cross_level:
-                segment.setPen(QPen(QColor("#FF6B9D"), 2))
-            else:
-                segment.setPen(QPen(QColor("#FFD700"), 2))
+            try:
+                if segment.scene():
+                    if segment.is_cross_level:
+                        segment.setPen(QPen(QColor("#FF6B9D"), 2))
+                    else:
+                        segment.setPen(QPen(QColor("#FFD700"), 2))
+            except RuntimeError:
+                pass
         super().hoverLeaveEvent(event)
 
     def itemChange(self, change, value):
@@ -497,7 +535,11 @@ class ConnectionCentroidItem(QGraphicsEllipseItem):
             # 当选中状态改变时，同步选中所有线段
             is_selected = value
             for segment in self.segment_items:
-                segment.setSelected(is_selected)
+                try:
+                    if segment.scene():
+                        segment.setSelected(is_selected)
+                except RuntimeError:
+                    pass
         return super().itemChange(change, value)
 
 
